@@ -7,6 +7,7 @@ one — never edit a merged ADR.
 | #   | Title                                            | Status   | Date       |
 | --- | ------------------------------------------------ | -------- | ---------- |
 | 001 | [Harness philosophy — mechanisms over prompts](001-harness-philosophy.md) | Accepted | 2026-08-06 |
+| 002 | [Test-Driven Development discipline](002-test-driven-development.md) | Accepted | 2026-08-06 |
 
 ## Conventions
 
