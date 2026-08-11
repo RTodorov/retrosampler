@@ -1,0 +1,4 @@
+# Custom labels for the perf self-hosted runner pool (ADR-004 r4).
+self-hosted-runner:
+  labels:
+    - perf
