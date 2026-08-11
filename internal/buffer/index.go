@@ -6,6 +6,7 @@ package buffer
 import (
 	"encoding/binary"
 	"math"
+	"math/bits"
 )
 
 const initialSlots = 1024
@@ -98,10 +99,25 @@ func newIndex() *index {
 	}
 }
 
-// hashKey computes the table hash for id from its low 8 bytes (trace IDs
-// are generated random, so the low bytes alone give a good distribution).
+// hashKey computes id's Fibonacci hash: fold the low and high 8 bytes
+// together with XOR (real trace IDs often carry a time prefix in their
+// first bytes, which would otherwise dominate one half and stay invisible
+// to a hash reading only the other half) and multiply by the golden-ratio
+// constant. Multiplication's carry propagates low-to-high, so the result's
+// HIGH bits are the well-mixed ones depending on every input bit; the LOW
+// bits depend only on the low input bits and must not be used directly as
+// a table index (startSlot takes care of that).
 func hashKey(id [16]byte) uint64 {
-	return binary.LittleEndian.Uint64(id[:8]) * hashSeed
+	h := binary.LittleEndian.Uint64(id[:8]) ^ binary.LittleEndian.Uint64(id[8:])
+	return h * hashSeed
+}
+
+// startSlot returns the table slot at which id's probe sequence begins: the
+// table-sized index carved from the high, well-mixed bits of hashKey(id).
+func (x *index) startSlot(id [16]byte) int {
+	mask := tableMask(len(x.slots))
+	shift := 64 - bits.Len64(mask)
+	return probeIdx((hashKey(id) >> shift) & mask)
 }
 
 // findSlot linear-probes the table for id. If id is present, it returns its
@@ -110,7 +126,7 @@ func hashKey(id [16]byte) uint64 {
 // empty slot) and found=false.
 func (x *index) findSlot(id [16]byte) (i int, found bool) {
 	mask := tableMask(len(x.slots))
-	start := hashKey(id) & mask
+	start := lenU64(x.startSlot(id))
 	tomb := -1
 	for p := uint64(0); p < lenU64(len(x.slots)); p++ {
 		j := probeIdx((start + p) & mask)
