@@ -27,6 +27,23 @@ func TestAppendCollectRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"frag-1", "frag-2"}, got, "active-segment reads must flush the write buffer")
 }
 
+func TestAppendRejectsOversizedFragment(t *testing.T) {
+	b, err := Open(t.TempDir(), Options{Window: time.Minute}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	oversized := make([]byte, maxRecordLen+1)
+	err = b.Append([16]byte{1}, oversized, time.Unix(1, 0))
+	require.Error(t, err, "a fragment past maxRecordLen would be unreadable by scanRecords on recovery, truncating every later record too")
+
+	// A rejected append must leave the buffer usable.
+	id := [16]byte{2}
+	require.NoError(t, b.Append(id, []byte("ok"), time.Unix(1, 0)))
+	var got []string
+	require.NoError(t, b.Collect(id, func(f []byte) { got = append(got, string(f)) }))
+	assert.Equal(t, []string{"ok"}, got)
+}
+
 func TestOpenRejectsOversizedSegmentSize(t *testing.T) {
 	_, err := Open(t.TempDir(), Options{Window: time.Minute, SegmentSize: 1<<30 + 1}, time.Unix(0, 0))
 	assert.Error(t, err, "segment_size above 1 GiB would let record offsets overflow their u32 field")
