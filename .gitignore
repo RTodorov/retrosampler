@@ -3,3 +3,4 @@ bin/
 coverage.out
 bench-new.txt
 e2e/out/
+e2e/compose/out/

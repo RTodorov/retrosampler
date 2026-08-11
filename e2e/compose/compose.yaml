@@ -1,0 +1,32 @@
+services:
+  retrosampler-1:
+    image: retrosampler-e2e:local
+    command: ["--config", "/etc/collector/config.yaml"]
+    environment:
+      - OUTPUT_PATH=/out/traces.json
+    volumes:
+      - ./config.yaml:/etc/collector/config.yaml:ro
+      - ./out/1:/out
+    ports:
+      - "43181:4317"
+
+  retrosampler-2:
+    image: retrosampler-e2e:local
+    command: ["--config", "/etc/collector/config.yaml"]
+    environment:
+      - OUTPUT_PATH=/out/traces.json
+    volumes:
+      - ./config.yaml:/etc/collector/config.yaml:ro
+      - ./out/2:/out
+    ports:
+      - "43182:4317"
+
+  loadgen-1:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
+    profiles: [load]
+    command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-1:4317", "--traces", "5000", "--rate", "200"]
+
+  loadgen-2:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
+    profiles: [load]
+    command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-2:4317", "--traces", "5000", "--rate", "200"]
