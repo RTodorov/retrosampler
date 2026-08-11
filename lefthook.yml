@@ -14,6 +14,9 @@ pre-commit:
       run: scripts/generated_sync.sh
     - name: adr-discipline
       run: scripts/adr_check.sh
+    - name: banned-tokens
+      glob: "*.go"
+      run: scripts/banned_tokens.sh {staged_files}
 
 commit-msg:
   jobs:
