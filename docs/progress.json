@@ -18,26 +18,63 @@
     "harness layer 2 (lefthook v2.1.10 brew runtime + pinned): pre-commit lint-changed/build/license/generated-sync/adr-discipline, commit-msg conventional regex, pre-push race tests; rejection and pass paths proven live",
     "harness layer 3 (CI, authored, unverified — no remote yet): ci.yml test+coverage-floor-80/generate-check/vuln/license/e2e/commit-range/integrity-grep, perf.yml dispatch-only self-hosted bench-gate+testbed; actionlint clean",
     "e2e green: ocb-built retrosamplercol ran otlp->retrosampler->file with telemetrygen traces",
-    "perf gate scripts: bench_gate.sh (benchstat, >10% time or any alloc regression, per-class baselines benchmarks/baseline-<class>.txt, class file benchmarks/CLASS=m-arm64), fails loudly with no benchmarks/baseline; make testbed fails loudly until scenario lands"
+    "perf gate scripts: bench_gate.sh (benchstat, >10% time or any alloc regression, per-class baselines benchmarks/baseline-<class>.txt, class file benchmarks/CLASS=m-arm64), fails loudly with no benchmarks/baseline; make testbed fails loudly until scenario lands",
+    "2026-08-11 CI verified green on GitHub (run 31483727725): all 6 jobs pass; fixes en route: golangci-lint pinned via official installer (go-install pinning conflicts with lefthook deps), go 1.25.11 for 3 stdlib CVEs flagged by vuln gate"
   ],
   "next": [
-    "push to github.com/rtodorov/retrosampler and verify CI workflows",
     "TDD the processor: buffer first (ADR-006 segments+index), against ADR-004 budgets",
-    "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64"
+    "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64",
+    "optional: bump actions/checkout to v5 (Node 20 deprecation annotation)"
   ],
   "pending_gates": [
-    {"gate": "hot-path allocs/span = 0 via testing.AllocsPerRun", "adr": "004 r2"},
-    {"gate": "OTTL-policy benchmark variant with own committed baseline", "adr": "004 r2, 008 r2"},
-    {"gate": "index <=150 B/live-trace budget test", "adr": "006 r5"},
-    {"gate": "Shutdown(ctx) deadline + flush test", "adr": "001 r12, 007 r6"},
-    {"gate": "goleak static goroutine census (TestMain landed at scaffold)", "adr": "007 r7"},
-    {"gate": "torn-tail CRC truncation / restart index rebuild test", "adr": "006 r6"},
-    {"gate": "decided-set idempotency: duplicate keeps, no duplicate flush/publish", "adr": "008 r5"},
-    {"gate": "overload ladder: watermark early-expiry, floor retryable error, queue-full retryable error, every shed counted", "adr": "007 r5"},
-    {"gate": "every-config-field-exercised reflection test", "adr": "005 r6"},
-    {"gate": "deterministic baseline: identical hash verdict across instances", "adr": "003 r6, 008 r1"},
-    {"gate": "verdict-before-spans race: keep with no buffered spans records decided", "adr": "008 r4"},
-    {"gate": "skew clamp: negative durations -> 0", "adr": "008 r7"}
+    {
+      "gate": "hot-path allocs/span = 0 via testing.AllocsPerRun",
+      "adr": "004 r2"
+    },
+    {
+      "gate": "OTTL-policy benchmark variant with own committed baseline",
+      "adr": "004 r2, 008 r2"
+    },
+    {
+      "gate": "index <=150 B/live-trace budget test",
+      "adr": "006 r5"
+    },
+    {
+      "gate": "Shutdown(ctx) deadline + flush test",
+      "adr": "001 r12, 007 r6"
+    },
+    {
+      "gate": "goleak static goroutine census (TestMain landed at scaffold)",
+      "adr": "007 r7"
+    },
+    {
+      "gate": "torn-tail CRC truncation / restart index rebuild test",
+      "adr": "006 r6"
+    },
+    {
+      "gate": "decided-set idempotency: duplicate keeps, no duplicate flush/publish",
+      "adr": "008 r5"
+    },
+    {
+      "gate": "overload ladder: watermark early-expiry, floor retryable error, queue-full retryable error, every shed counted",
+      "adr": "007 r5"
+    },
+    {
+      "gate": "every-config-field-exercised reflection test",
+      "adr": "005 r6"
+    },
+    {
+      "gate": "deterministic baseline: identical hash verdict across instances",
+      "adr": "003 r6, 008 r1"
+    },
+    {
+      "gate": "verdict-before-spans race: keep with no buffered spans records decided",
+      "adr": "008 r4"
+    },
+    {
+      "gate": "skew clamp: negative durations -> 0",
+      "adr": "008 r7"
+    }
   ],
   "open_decisions": [
     "bus technology + placement (ops, at provisioning; contract fixed in ADR-008)",
