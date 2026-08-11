@@ -1,0 +1,26 @@
+# Harness stages (ADR-001). Protected file - supersede ADR-001 to change.
+pre-commit:
+  parallel: true
+  jobs:
+    - name: lint-changed
+      glob: "*.go"
+      run: scripts/lint_changed.sh {staged_files}
+    - name: build
+      run: go build ./...
+    - name: license-headers
+      glob: "*.go"
+      run: PATH=.tools:$PATH addlicense -check -c "The retrosampler Authors" -l apache -s=only {staged_files}
+    - name: generated-sync
+      run: scripts/generated_sync.sh
+    - name: adr-discipline
+      run: scripts/adr_check.sh
+
+commit-msg:
+  jobs:
+    - name: conventional-commits
+      run: scripts/commit_msg.sh {1}
+
+pre-push:
+  jobs:
+    - name: race-tests
+      run: go test -race ./...
