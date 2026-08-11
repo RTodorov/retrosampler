@@ -64,6 +64,21 @@ func TestShadowShutdownStopsTicker(t *testing.T) {
 	require.NoError(t, p.shutdown(context.Background()))
 }
 
+func TestShadowShutdownTwiceIsSafeAndPostShutdownPassesThrough(t *testing.T) {
+	cfg := &Config{StorageDir: t.TempDir(), Window: time.Minute, SegmentSize: 32 << 20}
+	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
+	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
+
+	require.NoError(t, p.shutdown(context.Background()))
+	require.NoError(t, p.shutdown(context.Background()), "second shutdown must not panic")
+
+	td := ptrace.NewTraces()
+	td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	out, err := p.processTraces(context.Background(), td)
+	require.NoError(t, err)
+	assert.Equal(t, 1, out.SpanCount(), "post-shutdown: still passes through cleanly")
+}
+
 func TestFactoryLifecycleWithStorage(t *testing.T) {
 	f := NewFactory()
 	cfg := f.CreateDefaultConfig().(*Config)
