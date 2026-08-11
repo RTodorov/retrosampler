@@ -78,6 +78,14 @@ type slot struct {
 	head, tail int32
 }
 
+// refOf converts a real arena index to the +1-offset reference form stored
+// in slot.head/tail (0 = empty, -1 = tombstone).
+func refOf(i int32) int32 { return i + 1 }
+
+// idxOf converts a slot.head/tail reference back to the real arena index
+// (-1 when the reference marks an empty or tombstoned slot).
+func idxOf(ref int32) int32 { return ref - 1 }
+
 // index is a compact, single-writer trace index: an open-addressing table
 // of slot mapping trace ID to a chain of locs in a flat arena, with a free
 // list for reclaiming tombstoned chains (ADR-006 r5).
@@ -175,16 +183,16 @@ func (x *index) put(id [16]byte, l loc) {
 	if found {
 		s := &x.slots[i]
 		n := x.alloc(l)
-		x.arena[s.tail-1].next = n
-		s.tail = n + 1
+		x.arena[idxOf(s.tail)].next = n
+		s.tail = refOf(n)
 		return
 	}
 	s := &x.slots[i]
 	wasTomb := s.head == -1
 	n := x.alloc(l)
 	s.id = id
-	s.head = n + 1
-	s.tail = n + 1
+	s.head = refOf(n)
+	s.tail = refOf(n)
 	if wasTomb {
 		x.tombs--
 	}
@@ -197,7 +205,7 @@ func (x *index) head(id [16]byte) int32 {
 	if !found {
 		return -1
 	}
-	return x.slots[i].head - 1
+	return idxOf(x.slots[i].head)
 }
 
 // at returns the loc at arena index i (a real index, not offset).
@@ -236,8 +244,8 @@ func (x *index) sweep(n int, minGen uint32) {
 		if s.head <= 0 { // empty or already tombstoned
 			continue
 		}
-		if x.arena[s.tail-1].gen < minGen {
-			x.freeChain(s.head - 1)
+		if x.arena[idxOf(s.tail)].gen < minGen {
+			x.freeChain(idxOf(s.head))
 			s.head = -1
 			s.tail = 0
 			x.liveCount--
@@ -262,7 +270,7 @@ func (x *index) sweep(n int, minGen uint32) {
 func (x *index) compact() {
 	need := 0
 	for i := range x.slots {
-		for l := x.slots[i].head - 1; l >= 0; l = x.arena[l].next {
+		for l := idxOf(x.slots[i].head); l >= 0; l = x.arena[l].next {
 			need++
 		}
 	}
@@ -274,7 +282,7 @@ func (x *index) compact() {
 		}
 		newHead := int32(-1)
 		prev := int32(-1)
-		for l := s.head - 1; l >= 0; l = x.arena[l].next {
+		for l := idxOf(s.head); l >= 0; l = x.arena[l].next {
 			n := x.arena[l]
 			n.next = -1
 			ni := arenaIdx(len(newArena))
@@ -286,8 +294,8 @@ func (x *index) compact() {
 			}
 			prev = ni
 		}
-		s.head = newHead + 1
-		s.tail = prev + 1
+		s.head = refOf(newHead)
+		s.tail = refOf(prev)
 	}
 	x.arena = newArena
 	x.free = -1
