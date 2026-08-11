@@ -64,3 +64,31 @@ func TestShutdownHonoursDeadlineWhileWedged(t *testing.T) {
 	close(release)
 	require.NoError(t, s.Shutdown(context.Background()))
 }
+
+func TestTickExpiresWindowAndReportsDiskBytes(t *testing.T) {
+	dir := t.TempDir()
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(dir, clk)
+	opts.Shards = 1
+	opts.Window = time.Minute
+	opts.SegmentSize = 4096
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	frag := make([]byte, 1024)
+	for n := range uint64(20) { // ~5 segments of data
+		s.Offer(testID(n), frag, clk.Now())
+	}
+	require.Eventually(t, func() bool { return s.DiskBytesTotal() > 0 },
+		time.Second, 5*time.Millisecond, "ticks report disk usage globally")
+
+	clk.Advance(2 * time.Minute) // everything is now past the window
+	require.Eventually(t, func() bool {
+		// Window expiry deletes finalized segments; the stale active
+		// segment rolls and goes on a later tick. Fully drained =
+		// nothing left in the accounting.
+		return s.DiskBytesTotal() == 0
+	}, time.Second, 5*time.Millisecond, "window expiry reclaims everything eventually")
+}
