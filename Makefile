@@ -18,8 +18,9 @@ TOOL_PKGS := \
 	github.com/daixiang0/gci \
 	github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen
 
-.PHONY: install-tools fmt lint test cover generate build e2e testbed golden \
-        vuln bench bench-gate bench-baseline license license-check
+.PHONY: install-tools fmt lint test cover generate build build-linux e2e \
+        e2e-compose testbed golden vuln bench bench-gate bench-baseline \
+        license license-check
 
 install-tools:
 	mkdir -p $(TOOLS_DIR)
@@ -50,6 +51,15 @@ build:
 
 e2e: build
 	scripts/e2e.sh
+
+build-linux:
+	mkdir -p bin
+	GOOS=linux CGO_ENABLED=0 $(TOOLS_DIR)/builder --config builder-config.yaml
+	cp bin/ocb-dist/retrosamplercol bin/retrosamplercol-linux
+
+e2e-compose: build-linux
+	docker build -f e2e/compose/Dockerfile -t retrosampler-e2e:local bin
+	scripts/e2e_compose.sh
 
 testbed:
 	@echo "testbed scenario not implemented yet (ADR-004 r3 floors pending)" >&2; exit 1
