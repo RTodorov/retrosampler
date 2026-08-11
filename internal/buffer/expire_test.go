@@ -6,6 +6,7 @@ package buffer
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -89,4 +90,38 @@ func TestExpireSweepsIndex(t *testing.T) {
 	b.Expire(time.Unix(30, 0)) // roll stale active
 	b.Expire(time.Unix(30, 0)) // delete + sweep (chunk covers whole table)
 	assert.Zero(t, b.LiveTraces(), "dead traces reclaimed from index")
+}
+
+func TestExpireRemoveFailureKeepsSegmentReadable(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir, Options{Window: time.Minute, SegmentSize: 64}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	id1, id2 := [16]byte{1}, [16]byte{2}
+	frag := make([]byte, 40) // record = 24 header + 40 = 64 bytes
+	require.NoError(t, b.Append(id1, frag, time.Unix(10, 0)))
+	// Second append exceeds SegmentSize and rolls segment 1 to finalized.
+	require.NoError(t, b.Append(id2, frag, time.Unix(100, 0)))
+	require.Equal(t, uint32(2), b.ActiveGen())
+
+	// Sabotage: replace segment 1's path with a non-empty directory so
+	// os.Remove fails deterministically. The already-open reader fd still
+	// serves ReadAt.
+	p := filepath.Join(dir, "000000001.seg")
+	require.NoError(t, os.Remove(p))
+	require.NoError(t, os.MkdirAll(filepath.Join(p, "x"), 0o750))
+
+	// Segment 1 (tMax=10s) is expired at now=71s (cutoff 11s); the failed
+	// remove must leave it fully live.
+	b.Expire(time.Unix(71, 0))
+	assert.Equal(t, uint32(1), b.MinLiveGen(), "failed remove: minGen must not advance")
+	visits := 0
+	require.NoError(t, b.Collect(id1, func([]byte) { visits++ }))
+	assert.Equal(t, 1, visits, "failed remove: fragment stays collectable")
+
+	// Clear the sabotage; the retry reclaims it.
+	require.NoError(t, os.RemoveAll(filepath.Join(p, "x")))
+	b.Expire(time.Unix(71, 0))
+	assert.Equal(t, uint32(2), b.MinLiveGen(), "retry after clean Remove reclaims the segment")
 }
