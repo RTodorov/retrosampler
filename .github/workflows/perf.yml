@@ -7,7 +7,6 @@ on:
         required: true
 env:
   CGO_ENABLED: "0"
-  GOTOOLCHAIN: auto
 jobs:
   bench-gate:
     runs-on: [self-hosted, perf]

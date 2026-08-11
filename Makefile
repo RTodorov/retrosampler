@@ -24,7 +24,7 @@ TOOL_PKGS := \
 
 install-tools:
 	mkdir -p $(TOOLS_DIR)
-	cd internal/tools && GOBIN=$(TOOLS_DIR) GOFLAGS=-tags=tools go install $(TOOL_PKGS)
+	cd internal/tools && GOBIN=$(TOOLS_DIR) GOFLAGS=-tags=tools GOTOOLCHAIN=auto go install $(TOOL_PKGS)
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
 	  | sh -s -- -b $(TOOLS_DIR) $(GOLANGCI_LINT_V)
 
