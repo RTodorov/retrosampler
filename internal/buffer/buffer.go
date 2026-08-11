@@ -19,7 +19,11 @@ import (
 
 const (
 	defaultSegmentSize = 32 << 20
-	defaultSweepChunk  = 4096
+	// maxSegmentSize bounds Options.SegmentSize: record offsets are u32
+	// (lenU32), so a segment materially larger than this would let offsets
+	// wrap and silently corrupt later records on recovery.
+	maxSegmentSize    = 1 << 30
+	defaultSweepChunk = 4096
 )
 
 // Options configures a Buffer.
@@ -110,6 +114,9 @@ func Open(dir string, opts Options, now time.Time) (*Buffer, error) {
 	}
 	if opts.SegmentSize <= 0 {
 		opts.SegmentSize = defaultSegmentSize
+	}
+	if opts.SegmentSize > maxSegmentSize {
+		return nil, errors.New("buffer: Options.SegmentSize must be at most 1 GiB")
 	}
 	if opts.SweepChunk <= 0 {
 		opts.SweepChunk = defaultSweepChunk

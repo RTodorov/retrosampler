@@ -27,5 +27,11 @@ func (cfg *Config) Validate() error {
 	if cfg.SegmentSize < 1<<20 {
 		return errors.New("segment_size must be at least 1 MiB")
 	}
+	// Record offsets are u32 (internal/buffer.lenU32): a segment materially
+	// larger than 1 GiB would let offsets wrap and silently corrupt later
+	// records on recovery.
+	if cfg.SegmentSize > 1<<30 {
+		return errors.New("segment_size must be at most 1 GiB")
+	}
 	return nil
 }

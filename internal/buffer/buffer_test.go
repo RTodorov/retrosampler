@@ -27,6 +27,17 @@ func TestAppendCollectRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"frag-1", "frag-2"}, got, "active-segment reads must flush the write buffer")
 }
 
+func TestOpenRejectsOversizedSegmentSize(t *testing.T) {
+	_, err := Open(t.TempDir(), Options{Window: time.Minute, SegmentSize: 1<<30 + 1}, time.Unix(0, 0))
+	assert.Error(t, err, "segment_size above 1 GiB would let record offsets overflow their u32 field")
+}
+
+func TestOpenAcceptsSegmentSizeAtBound(t *testing.T) {
+	b, err := Open(t.TempDir(), Options{Window: time.Minute, SegmentSize: 1 << 30}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+}
+
 func TestCollectUnknownTrace(t *testing.T) {
 	b, err := Open(t.TempDir(), Options{Window: time.Minute}, time.Unix(0, 0))
 	require.NoError(t, err)

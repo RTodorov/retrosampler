@@ -29,6 +29,8 @@ func TestConfigValidate(t *testing.T) {
 		{"zero window", func(c *Config) { c.Window = 0 }, false},
 		{"negative window", func(c *Config) { c.Window = -time.Second }, false},
 		{"tiny segment", func(c *Config) { c.SegmentSize = 1 << 10 }, false},
+		{"segment at 1 GiB bound", func(c *Config) { c.SegmentSize = 1 << 30 }, true},
+		{"segment above 1 GiB bound", func(c *Config) { c.SegmentSize = 1<<30 + 1 }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := createDefaultConfig().(*Config)
