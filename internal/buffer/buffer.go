@@ -391,9 +391,11 @@ func (b *Buffer) deleteExpired(cutoff int64) {
 			return
 		}
 		if r, open := b.readers[gen]; open {
-			if err := r.Close(); err != nil {
-				return
-			}
+			// Best-effort: a close failure must not wedge the map entry in
+			// place, or every later Expire retries the same failing Close
+			// forever and the segment (and its disk space) is never
+			// reclaimed.
+			_ = r.Close()
 			delete(b.readers, gen)
 		}
 		if err := os.Remove(segPath(b.dir, gen)); err != nil {
@@ -418,26 +420,28 @@ func (b *Buffer) oldestFinalized() (gen uint32, meta segMeta, ok bool) {
 
 // Close flushes and fsyncs the active segment and closes every open file
 // handle. No footer is written for the active segment — recovery rescans
-// it on the next Open (ADR-006 r6).
+// it on the next Open (ADR-006 r6). Best-effort: every handle is attempted
+// regardless of an earlier failure, and every error is reported.
 func (b *Buffer) Close() error {
+	var errs []error
 	if err := b.w.flush(); err != nil {
-		return fmt.Errorf("buffer: flush active segment: %w", err)
+		errs = append(errs, fmt.Errorf("buffer: flush active segment: %w", err))
 	}
 	if err := b.w.f.Sync(); err != nil {
-		return fmt.Errorf("buffer: sync active segment: %w", err)
+		errs = append(errs, fmt.Errorf("buffer: sync active segment: %w", err))
 	}
 	if err := b.w.f.Close(); err != nil {
-		return fmt.Errorf("buffer: close active segment: %w", err)
+		errs = append(errs, fmt.Errorf("buffer: close active segment: %w", err))
 	}
 	if b.activeReader != nil {
 		if err := b.activeReader.Close(); err != nil {
-			return fmt.Errorf("buffer: close active reader: %w", err)
+			errs = append(errs, fmt.Errorf("buffer: close active reader: %w", err))
 		}
 	}
 	for gen, f := range b.readers {
 		if err := f.Close(); err != nil {
-			return fmt.Errorf("buffer: close segment %d: %w", gen, err)
+			errs = append(errs, fmt.Errorf("buffer: close segment %d: %w", gen, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

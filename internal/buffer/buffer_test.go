@@ -5,6 +5,7 @@ package buffer
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -53,6 +54,40 @@ func TestOpenAcceptsSegmentSizeAtBound(t *testing.T) {
 	b, err := Open(t.TempDir(), Options{Window: time.Minute, SegmentSize: 1 << 30}, time.Unix(0, 0))
 	require.NoError(t, err)
 	defer func() { _ = b.Close() }()
+}
+
+func TestCloseIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir, Options{Window: time.Minute, SegmentSize: 1 << 20}, time.Unix(0, 0))
+	require.NoError(t, err)
+
+	frag := bytes.Repeat([]byte("x"), 512<<10)
+	require.NoError(t, b.Append([16]byte{1}, frag, time.Unix(1, 0))) // gen1
+	require.NoError(t, b.Append([16]byte{2}, frag, time.Unix(2, 0))) // rolls: gen1 finalized, gen2 active
+	require.NoError(t, b.Append([16]byte{3}, frag, time.Unix(3, 0))) // rolls: gen2 finalized, gen3 active
+	require.NoError(t, b.Append([16]byte{4}, frag, time.Unix(4, 0))) // rolls: gen3 finalized, gen4 active
+
+	// Pre-close two finalized readers (gen1 and gen3, with a good one, gen2,
+	// in between) so Close's own Close calls on both error. A first-error
+	// return would only ever report whichever of the two the (unordered)
+	// map iteration reaches first; every handle must be attempted and every
+	// error reported.
+	require.NoError(t, b.readers[1].Close())
+	require.NoError(t, b.readers[3].Close())
+	activeGen := b.ActiveGen()
+
+	err = b.Close()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "segment 1")
+	require.ErrorContains(t, err, "segment 3")
+
+	// The active segment's writer must still have been flushed and closed.
+	f, ferr := os.Open(segPath(dir, activeGen))
+	require.NoError(t, ferr)
+	defer func() { _ = f.Close() }()
+	buf, rerr := io.ReadAll(f)
+	require.NoError(t, rerr)
+	assert.NotEmpty(t, buf, "active segment must have been flushed even though reader closes failed")
 }
 
 func TestCollectUnknownTrace(t *testing.T) {
