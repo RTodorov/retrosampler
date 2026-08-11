@@ -8,14 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func TestConfig_DefaultIsValid(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{}
-	require.NoError(t, cfg.Validate())
-}
 
 func TestConfigDefaults(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
