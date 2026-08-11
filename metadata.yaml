@@ -1,0 +1,11 @@
+type: retrosampler
+
+status:
+  class: processor
+  stability:
+    development: [traces]
+  codeowners:
+    active: [rtodorov]
+
+tests:
+  config:
