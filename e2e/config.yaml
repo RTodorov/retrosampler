@@ -7,6 +7,7 @@ receivers:
 processors:
   retrosampler:
     storage_dir: /tmp/retrosampler-buffer
+    disk_budget: 2147483648
 
 exporters:
   file:
