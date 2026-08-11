@@ -350,9 +350,61 @@ func (b *Buffer) readerFor(gen uint32, flushed *bool) (*os.File, error) {
 }
 
 // Expire advances the buffer's retention boundary and reclaims expired
-// segments and index entries. STUB: Task 9 lands the real implementation;
-// for now this is a no-op.
-func (b *Buffer) Expire(_ time.Time) {}
+// segments and index entries, in order:
+//  1. delete every finalized segment whose tMax is older than now-Window,
+//     ascending gen, advancing minGen past each;
+//  2. if the active segment is itself stale (nonempty, tMax older than
+//     now-Window), roll it so rule 1 deletes it on the next call;
+//  3. sweep up to SweepChunk index slots to reclaim dead traces' locs now
+//     that minGen has advanced.
+func (b *Buffer) Expire(now time.Time) {
+	cutoff := now.Add(-b.opts.Window).UnixNano()
+	b.deleteExpired(cutoff)
+
+	if b.w.size > 0 && b.w.tMax < cutoff {
+		// Expire has no error return (brief's signature); a roll failure here
+		// leaves the active segment as-is and is retried on the next call.
+		_ = b.roll()
+	}
+
+	b.idx.sweep(b.opts.SweepChunk, b.minGen)
+}
+
+// deleteExpired removes every finalized segment whose tMax < cutoff, in
+// ascending gen order, advancing minGen past each deleted segment. Gens are
+// contiguous by construction (roll always allocates gen+1), so finding and
+// removing the minimum repeatedly correctly walks the expired prefix.
+func (b *Buffer) deleteExpired(cutoff int64) {
+	for {
+		gen, meta, ok := b.oldestFinalized()
+		if !ok || meta.tMax >= cutoff {
+			return
+		}
+		if r, open := b.readers[gen]; open {
+			if err := r.Close(); err != nil {
+				return
+			}
+			delete(b.readers, gen)
+		}
+		if err := os.Remove(segPath(b.dir, gen)); err != nil {
+			return
+		}
+		delete(b.metas, gen)
+		b.minGen = gen + 1
+	}
+}
+
+// oldestFinalized returns the finalized segment with the lowest gen still
+// tracked in metas, or ok=false if none remain.
+func (b *Buffer) oldestFinalized() (gen uint32, meta segMeta, ok bool) {
+	first := true
+	for g, m := range b.metas {
+		if first || g < gen {
+			gen, meta, first = g, m, false
+		}
+	}
+	return gen, meta, !first
+}
 
 // Close flushes and fsyncs the active segment and closes every open file
 // handle. No footer is written for the active segment — recovery rescans
