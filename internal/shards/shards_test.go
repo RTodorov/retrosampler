@@ -64,7 +64,7 @@ func TestConservationSequential(t *testing.T) {
 
 	st := s.Stats()
 	got := collectAll(t, dir, opts, ids)
-	assert.Equal(t, uint64(100), got+st.ShedQueueFull,
+	assert.Equal(t, uint64(100), got+st.ShedQueueFull+st.ShedFloor,
 		"every offered fragment is buffered or counted as shed")
 	assert.Zero(t, st.AppendErrors)
 }
@@ -96,7 +96,7 @@ func TestConservationConcurrent(t *testing.T) {
 	}
 	st := s.Stats()
 	got := collectAll(t, dir, opts, ids)
-	assert.Equal(t, uint64(goroutines*perG), got+st.ShedQueueFull,
+	assert.Equal(t, uint64(goroutines*perG), got+st.ShedQueueFull+st.ShedFloor,
 		"concurrent ingest: every fragment buffered or counted as shed")
 }
 
@@ -106,5 +106,7 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	require.NoError(t, s.Shutdown(context.Background()))
 	require.NoError(t, s.Shutdown(context.Background()), "second shutdown must not panic or hang")
 	s.Offer(testID(1), []byte("x"), clk.Now())
-	assert.Zero(t, s.Stats().ShedQueueFull, "post-shutdown offers are ignored, not counted as shed")
+	st := s.Stats()
+	assert.Zero(t, st.ShedQueueFull, "post-shutdown offers are ignored, not counted as shed")
+	assert.Zero(t, st.ShedFloor, "post-shutdown offers are ignored, not counted as floor shed")
 }

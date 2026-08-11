@@ -127,3 +127,32 @@ func TestWatermarkEarlyExpiryShrinksEffectiveWindow(t *testing.T) {
 	assert.Less(t, s.EffectiveWindow(), opts.Window,
 		"the gauge shows the window the watermark actually left standing")
 }
+
+func TestFloorProtectedDataMakesOfferShed(t *testing.T) {
+	dir := t.TempDir()
+	clk := newFakeClock(time.Unix(10000, 0))
+	opts := testOptions(dir, clk)
+	opts.Shards = 1
+	opts.Window = time.Hour
+	opts.SegmentSize = 4096
+	opts.DiskBudget = 8 << 10 // 8 KiB budget: immediately over watermark
+	opts.WatermarkPct = 50
+	opts.WindowFloor = 45 * time.Minute // 30-minute-old data is floor-protected
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	old := clk.Now().Add(-30 * time.Minute)
+	frag := make([]byte, 1024)
+	for n := range uint64(16) { // ~16 KiB: over the 4 KiB limit
+		s.Offer(testID(n), frag, old)
+	}
+
+	require.Eventually(t, func() bool {
+		s.Offer(testID(999), frag, clk.Now())
+		return s.Stats().ShedFloor > 0
+	}, time.Second, 5*time.Millisecond,
+		"over watermark with floor-protected candidates: ingest sheds, counted")
+	assert.Zero(t, s.Stats().EarlyExpiredSegments,
+		"floor-protected segments are never sacrificed")
+}
