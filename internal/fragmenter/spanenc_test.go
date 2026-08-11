@@ -79,6 +79,30 @@ func TestGroupEncodeRoundTrip(t *testing.T) {
 	assert.JSONEq(t, jsonOf(t, td), jsonOf(t, got))
 }
 
+// TestGroupEncodeMultiScopeRun covers the inner run-split branch of
+// sizeRSRun/putGroup: two ScopeSpans runs under one ResourceSpans, for the
+// same trace.
+func TestGroupEncodeMultiScopeRun(t *testing.T) {
+	td := ptrace.NewTraces()
+	rs := td.ResourceSpans().AppendEmpty()
+	rs.Resource().Attributes().PutStr("service.name", "svc-a")
+	ss0 := rs.ScopeSpans().AppendEmpty()
+	ss0.Scope().SetName("lib-a")
+	fullSpan(ss0.Spans().AppendEmpty(), 1)
+	ss1 := rs.ScopeSpans().AppendEmpty()
+	ss1.Scope().SetName("lib-b")
+	fullSpan(ss1.Spans().AppendEmpty(), 2)
+
+	refs := []spanRef{{rs: 0, ss: 0, sp: 0, next: -1}, {rs: 0, ss: 1, sp: 0, next: -1}}
+	var e enc
+	putGroup(&e, td, refs)
+	assert.Len(t, e.b, sizeGroup(td, refs), "size pass must match encode pass")
+
+	got, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(e.b)
+	require.NoError(t, err)
+	assert.JSONEq(t, jsonOf(t, td), jsonOf(t, got))
+}
+
 func TestGroupEncodeSubset(t *testing.T) {
 	// two traces interleaved in one scope; encode only trace A's spans
 	td := ptrace.NewTraces()
