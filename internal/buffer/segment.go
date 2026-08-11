@@ -70,9 +70,11 @@ type segmentWriter struct {
 // knows the generation (it opened the file at a segPath-formatted path, or
 // created the segmentWriter with that gen) and must set segMeta.gen itself.
 type segMeta struct {
-	gen     uint32
-	tMin    int64
-	tMax    int64
+	gen  uint32
+	tMin int64
+	tMax int64
+	// size is the finalized file's on-disk byte size, including footer and trailer.
+	size    int64
 	entries []dirEntry
 }
 
