@@ -21,10 +21,6 @@ type Config struct {
 
 // Validate checks that the configuration is usable.
 func (cfg *Config) Validate() error {
-	// Uninitialized passthrough (all zero values) is allowed
-	if cfg.StorageDir == "" && cfg.Window == 0 && cfg.SegmentSize == 0 {
-		return nil
-	}
 	if cfg.Window <= 0 {
 		return errors.New("window must be positive")
 	}
