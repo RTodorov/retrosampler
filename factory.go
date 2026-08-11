@@ -9,12 +9,15 @@ import (
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/processorhelper"
 
 	"github.com/rtodorov/retrosampler/internal/metadata"
 )
+
+// systemClock is the wall clock, injected into the processor from here — the
+// one place forbidigo permits a bare time.Now (ADR-002 r4).
+var systemClock = time.Now
 
 // NewFactory creates a factory for the retrosampler processor.
 func NewFactory() processor.Factory {
@@ -32,10 +35,8 @@ func createDefaultConfig() component.Config {
 func createTraces(ctx context.Context, set processor.Settings,
 	cfg component.Config, next consumer.Traces,
 ) (processor.Traces, error) {
-	return processorhelper.NewTraces(ctx, set, cfg, next, processTraces)
-}
-
-// processTraces is a passthrough; buffering logic lands via TDD (ADR-006/007).
-func processTraces(_ context.Context, td ptrace.Traces) (ptrace.Traces, error) {
-	return td, nil
+	p := newShadowProcessor(cfg.(*Config), set.Logger, systemClock)
+	return processorhelper.NewTraces(ctx, set, cfg, next, p.processTraces,
+		processorhelper.WithStart(p.start),
+		processorhelper.WithShutdown(p.shutdown))
 }
