@@ -29,25 +29,37 @@
     "e2e green: ocb-built retrosamplercol ran otlp->retrosampler->file with telemetrygen traces",
     "perf gate scripts: bench_gate.sh (benchstat, >10% time or any alloc regression, per-class baselines benchmarks/baseline-<class>.txt, class file benchmarks/CLASS=m-arm64), fails loudly with no benchmarks/baseline; make testbed fails loudly until scenario lands",
     "2026-08-11 CI verified green on GitHub (run 31483727725): all 6 jobs pass; fixes en route: golangci-lint pinned via official installer (go-install pinning conflicts with lefthook deps), go 1.25.11 for 3 stdlib CVEs flagged by vuln gate",
-    "2026-08-11 compose e2e gate: 2-instance topology (retrosampler-1/2, distroless image from host-cross-compiled ocb binary), pinned telemetrygen paced load, exact span-conservation assertions (10000/instance), make e2e-compose + CI job; failure path proven"
+    "2026-08-11 compose e2e gate: 2-instance topology (retrosampler-1/2, distroless image from host-cross-compiled ocb binary), pinned telemetrygen paced load, exact span-conservation assertions (10000/instance), make e2e-compose + CI job; failure path proven",
+    "2026-08-11 stage-1 buffer core BUILT (b692c9d..9846bc9, 26 commits, subagent-driven, per-task + final reviews): internal/fragmenter (hand-rolled OTLP encoder, zero-alloc grouping), internal/buffer (CRC records, footer/trailer segments, fsync-on-roll, compact index w/ arena+compaction, whole-segment expiry, torn-tail recovery), shadow processor wiring (coarse mutex + 1s expiry ticker, idempotent shutdown, injected clock); gates GREEN: 004 r2 zero-alloc (stage-1 scope), 006 r5 budget 149.4 B/live-trace, 006 r6 torn-tail every-byte sweep; benchmarks Ingest ~350ns/span 0 allocs, KeepFlush ~116us, Expiry ~1us; baseline-m-arm64 committed, bench-gate live; final-review fixes: full-id fibonacci hash, 1GiB segment_size bound, 64MiB fragment cap, best-effort close; acceptance green (lint/race/cover 87-83.8-97.8/generate/bench-gate/e2e) EXCEPT compose-e2e blocked on docker daemon down"
   ],
   "next": [
-    "write implementation plan for buffer-core spec (superpowers writing-plans), then TDD per spec sequence",
-    "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64",
+    "stage-1 acceptance: make e2e-compose once docker daemon is back (only open acceptance item; shadow buffering must keep conservation green)",
+    "fix harness gap BEFORE stage-2 subagent work: PreToolUse lint-suppression/skip guard did not fire in subagent sessions (proven active in main session; caught by review instead, tree verified clean by grep)",
+    "stage 2: shard layer + overload ladder (ADR-007) — delete the temporary coarse mutex in processor.go, buffer instances become shard-owned; spec via brainstorming per roadmap",
+    "stage 2 carry-overs: guard-helper convention consolidation (ok-returning), index +1/-1 offset helper pair, deleteExpired os.Remove-error path keeps meta entry, budget gate has only 0.4% headroom (expect it red on index changes)",
     "grow compose scenario: bus container + cross-instance keep assertions when bus client lands; custom fragment-splitting loadgen designed with first keep condition"
+  ],
+  "gates_green": [
+    {
+      "gate": "hot-path allocs/span = 0 via testing.AllocsPerRun (stage-1 scope: fragment+append; shard routing joins in stage 2)",
+      "adr": "004 r2",
+      "test": "internal/buffer TestHotPathZeroAllocs"
+    },
+    {
+      "gate": "index <=150 B/live-trace budget (149.4 measured at pinned workload)",
+      "adr": "006 r5",
+      "test": "internal/buffer TestIndexBudgetPerLiveTrace"
+    },
+    {
+      "gate": "torn-tail CRC truncation / restart index rebuild (every-byte boundary sweep)",
+      "adr": "006 r6",
+      "test": "internal/buffer recovery_test.go"
+    }
   ],
   "pending_gates": [
     {
-      "gate": "hot-path allocs/span = 0 via testing.AllocsPerRun",
-      "adr": "004 r2"
-    },
-    {
       "gate": "OTTL-policy benchmark variant with own committed baseline",
       "adr": "004 r2, 008 r2"
-    },
-    {
-      "gate": "index <=150 B/live-trace budget test",
-      "adr": "006 r5"
     },
     {
       "gate": "Shutdown(ctx) deadline + flush test",
