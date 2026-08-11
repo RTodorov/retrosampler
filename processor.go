@@ -5,8 +5,9 @@ package retrosampler
 
 import (
 	"context"
-	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
@@ -14,34 +15,47 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 
-	"github.com/rtodorov/retrosampler/internal/buffer"
 	"github.com/rtodorov/retrosampler/internal/fragmenter"
+	"github.com/rtodorov/retrosampler/internal/shards"
 )
 
-const expireInterval = time.Second
-
-// shadowProcessor buffers every span and passes every span through
-// (stage-1 shadow mode; retention semantics land with the decision plane).
-// The coarse mutex is temporary scaffolding — stage 2 replaces it with
-// shard-owned single-writer buffers (ADR-007).
+// shadowProcessor buffers every span into the shard set and passes every
+// span through (shadow mode; retention semantics land with the decision
+// plane). ConsumeTraces may run on many goroutines: shared state is the
+// atomic set pointer and a pool of single-threaded fragmenters.
 type shadowProcessor struct {
 	cfg    *Config
 	logger *zap.Logger
 	now    func() time.Time
 
-	mu   sync.Mutex
-	frag *fragmenter.Fragmenter
-	buf  *buffer.Buffer
+	set      atomic.Pointer[shards.Set]
+	fragPool sync.Pool
+}
 
-	stop chan struct{}
-	done chan struct{}
+// pooledFrag pairs a fragmenter with a reusable routing callback: the
+// closure is allocated once per pooled entry and re-targeted per batch
+// through the struct fields, keeping the hot path allocation-free
+// (ADR-004 r2).
+type pooledFrag struct {
+	f   *fragmenter.Fragmenter
+	set *shards.Set
+	now time.Time
+	fn  func(id pcommon.TraceID, frag []byte)
+}
+
+func newPooledFrag() *pooledFrag {
+	pf := &pooledFrag{f: fragmenter.New()}
+	pf.fn = func(id pcommon.TraceID, frag []byte) { pf.set.Offer(id, frag, pf.now) }
+	return pf
 }
 
 // newShadowProcessor takes the clock from the caller (the factory in
-// production), defaulting to time.Now — bare time.Now() calls are blocked by
-// forbidigo outside factory.go (ADR-002 r4).
+// production), defaulting to time.Now — bare time.Now() calls are blocked
+// by forbidigo outside factory.go (ADR-002 r4).
 func newShadowProcessor(cfg *Config, logger *zap.Logger, now func() time.Time) *shadowProcessor {
-	return &shadowProcessor{cfg: cfg, logger: logger, now: now}
+	p := &shadowProcessor{cfg: cfg, logger: logger, now: now}
+	p.fragPool.New = func() any { return newPooledFrag() }
+	return p
 }
 
 func (p *shadowProcessor) start(_ context.Context, _ component.Host) error {
@@ -49,72 +63,46 @@ func (p *shadowProcessor) start(_ context.Context, _ component.Host) error {
 		p.logger.Warn("retrosampler: storage_dir empty, shadow buffering disabled")
 		return nil
 	}
-	if err := os.MkdirAll(p.cfg.StorageDir, 0o750); err != nil {
-		return err
+	n := runtime.GOMAXPROCS(0)
+	if p.cfg.Shards > 0 && p.cfg.Shards < n {
+		n = p.cfg.Shards
 	}
-	buf, err := buffer.Open(p.cfg.StorageDir, buffer.Options{
-		Window:      p.cfg.Window,
-		SegmentSize: p.cfg.SegmentSize,
-	}, p.now())
+	set, err := shards.New(shards.Options{
+		Dir:          p.cfg.StorageDir,
+		Shards:       n,
+		Window:       p.cfg.Window,
+		SegmentSize:  p.cfg.SegmentSize,
+		DiskBudget:   p.cfg.DiskBudget,
+		WatermarkPct: p.cfg.WatermarkPct,
+		WindowFloor:  p.cfg.WindowFloor,
+		Now:          p.now,
+	})
 	if err != nil {
 		return err
 	}
-	p.buf = buf
-	p.frag = fragmenter.New()
-	p.stop = make(chan struct{})
-	p.done = make(chan struct{})
-	go p.expireLoop()
+	p.set.Store(set)
 	return nil
 }
 
-func (p *shadowProcessor) expireLoop() {
-	defer close(p.done)
-	t := time.NewTicker(expireInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-p.stop:
-			return
-		case <-t.C:
-			p.mu.Lock()
-			if p.buf != nil {
-				p.buf.Expire(p.now())
-			}
-			p.mu.Unlock()
-		}
-	}
-}
-
 func (p *shadowProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptrace.Traces, error) {
-	now := p.now()
-	p.mu.Lock()
-	buf := p.buf
-	if buf != nil {
-		p.frag.Fragment(td, func(id pcommon.TraceID, frag []byte) {
-			if err := buf.Append(id, frag, now); err != nil {
-				// Shadow mode: buffering failure must never fail the pipeline.
-				p.logger.Debug("retrosampler: shadow append failed", zap.Error(err))
-			}
-		})
+	s := p.set.Load()
+	if s == nil {
+		return td, nil
 	}
-	p.mu.Unlock()
+	pf := p.fragPool.Get().(*pooledFrag)
+	pf.set, pf.now = s, p.now()
+	pf.f.Fragment(td, pf.fn)
+	pf.set = nil
+	p.fragPool.Put(pf)
 	return td, nil
 }
 
-// shutdown is idempotent: the check-and-clear of p.buf happens atomically
-// under the mutex, so a second call (or a concurrent one) sees buf == nil
-// and returns immediately instead of double-closing p.stop. expireLoop and
-// processTraces both read p.buf under the same mutex, so nilling it here
-// also closes the race against their access to a buffer mid-Close.
-func (p *shadowProcessor) shutdown(context.Context) error {
-	p.mu.Lock()
-	buf := p.buf
-	p.buf = nil
-	p.mu.Unlock()
-	if buf == nil {
+// shutdown swaps the set out atomically, so it runs the real shutdown at
+// most once and later ConsumeTraces calls fall back to pure passthrough.
+func (p *shadowProcessor) shutdown(ctx context.Context) error {
+	s := p.set.Swap(nil)
+	if s == nil {
 		return nil
 	}
-	close(p.stop)
-	<-p.done
-	return buf.Close()
+	return s.Shutdown(ctx)
 }
