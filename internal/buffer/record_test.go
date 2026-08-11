@@ -16,7 +16,7 @@ func TestRecordHeaderRoundTrip(t *testing.T) {
 	var h [recHeaderLen]byte
 	putRecordHeader(&h, id, frag)
 	length, gotID, crc := parseRecordHeader(h)
-	assert.Equal(t, lenU32(len(frag)), length)
+	assert.Equal(t, uint32(7), length)
 	assert.Equal(t, id, gotID)
 	assert.Equal(t, crc32.Checksum(frag, castagnoli), crc)
 }
