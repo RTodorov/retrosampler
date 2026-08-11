@@ -125,3 +125,34 @@ func TestExpireRemoveFailureKeepsSegmentReadable(t *testing.T) {
 	b.Expire(time.Unix(71, 0))
 	assert.Equal(t, uint32(2), b.MinLiveGen(), "retry after clean Remove reclaims the segment")
 }
+
+func TestExpireOldestForcesOutTheOldestSegment(t *testing.T) {
+	b, err := Open(t.TempDir(), Options{Window: time.Hour, SegmentSize: 64}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	_, ok := b.OldestFinalizedTMax()
+	assert.False(t, ok, "no finalized segments yet")
+	_, ok = b.ExpireOldest()
+	assert.False(t, ok, "nothing to force-expire")
+
+	frag := make([]byte, 40)
+	require.NoError(t, b.Append([16]byte{1}, frag, time.Unix(10, 0)))
+	require.NoError(t, b.Append([16]byte{2}, frag, time.Unix(20, 0))) // rolls gen 1
+	require.NoError(t, b.Append([16]byte{3}, frag, time.Unix(30, 0))) // rolls gen 2
+
+	tMax, ok := b.OldestFinalizedTMax()
+	require.True(t, ok)
+	assert.Equal(t, time.Unix(10, 0).UnixNano(), tMax)
+
+	before := b.DiskBytes()
+	freed, ok := b.ExpireOldest()
+	require.True(t, ok)
+	assert.Positive(t, freed)
+	assert.Equal(t, before-freed, b.DiskBytes(), "freed bytes leave the accounting")
+	assert.Equal(t, uint32(2), b.MinLiveGen(), "well inside the window, gen 1 is still forced out")
+
+	tMax, ok = b.OldestFinalizedTMax()
+	require.True(t, ok)
+	assert.Equal(t, time.Unix(20, 0).UnixNano(), tMax, "next-oldest becomes the candidate")
+}
