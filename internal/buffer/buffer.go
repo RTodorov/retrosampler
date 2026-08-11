@@ -395,20 +395,30 @@ func (b *Buffer) deleteExpired(cutoff int64) {
 		if !ok || meta.tMax >= cutoff {
 			return
 		}
-		if r, open := b.readers[gen]; open {
-			// Best-effort: a close failure must not wedge the map entry in
-			// place, or every later Expire retries the same failing Close
-			// forever and the segment (and its disk space) is never
-			// reclaimed.
-			_ = r.Close()
-			delete(b.readers, gen)
-		}
-		if err := os.Remove(segPath(b.dir, gen)); err != nil {
+		if !b.removeSegment(gen) {
 			return
 		}
-		delete(b.metas, gen)
-		b.minGen = gen + 1
 	}
+}
+
+// removeSegment unlinks finalized segment gen and drops its bookkeeping.
+// The file is removed first: if Remove fails, the reader, meta entry, and
+// minGen are left untouched, so Collect keeps working and the next Expire
+// retries. Nothing is torn down until the disk space is actually gone.
+func (b *Buffer) removeSegment(gen uint32) bool {
+	if err := os.Remove(segPath(b.dir, gen)); err != nil {
+		return false
+	}
+	if r, open := b.readers[gen]; open {
+		// Best-effort: a close failure must not wedge the map entry in
+		// place, or every later Expire would retry a Close that can no
+		// longer matter — the file is already gone.
+		_ = r.Close()
+		delete(b.readers, gen)
+	}
+	delete(b.metas, gen)
+	b.minGen = gen + 1
+	return true
 }
 
 // oldestFinalized returns the finalized segment with the lowest gen still
