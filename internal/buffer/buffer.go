@@ -454,6 +454,29 @@ func (b *Buffer) DiskBytes() int64 {
 	return b.finalizedBytes + b.w.size
 }
 
+// OldestFinalizedTMax returns the newest-record timestamp of the oldest
+// finalized segment — the data the watermark rung would sacrifice next —
+// or ok=false when no finalized segment exists.
+func (b *Buffer) OldestFinalizedTMax() (tMax int64, ok bool) {
+	_, meta, ok := b.oldestFinalized()
+	return meta.tMax, ok
+}
+
+// ExpireOldest force-expires the oldest finalized segment regardless of
+// the retention window (the ADR-007 watermark rung) and returns the disk
+// bytes freed. ok is false when no finalized segment exists or the file
+// removal failed (the next call retries).
+func (b *Buffer) ExpireOldest() (freed int64, ok bool) {
+	gen, meta, ok := b.oldestFinalized()
+	if !ok {
+		return 0, false
+	}
+	if !b.removeSegment(gen) {
+		return 0, false
+	}
+	return meta.size, true
+}
+
 // Close flushes and fsyncs the active segment and closes every open file
 // handle. No footer is written for the active segment — recovery rescans
 // it on the next Open (ADR-006 r6). Best-effort: every handle is attempted
