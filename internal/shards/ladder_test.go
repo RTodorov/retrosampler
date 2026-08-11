@@ -92,3 +92,38 @@ func TestTickExpiresWindowAndReportsDiskBytes(t *testing.T) {
 		return s.DiskBytesTotal() == 0
 	}, time.Second, 5*time.Millisecond, "window expiry reclaims everything eventually")
 }
+
+func TestWatermarkEarlyExpiryShrinksEffectiveWindow(t *testing.T) {
+	dir := t.TempDir()
+	clk := newFakeClock(time.Unix(10000, 0))
+	opts := testOptions(dir, clk)
+	opts.Shards = 1
+	opts.Window = time.Hour // window expiry must never fire in this test
+	opts.SegmentSize = 4096
+	opts.DiskBudget = 64 << 10
+	opts.WatermarkPct = 50 // limit: 32 KiB
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	// ~64 KiB of data stamped 30 minutes ago: well inside the window,
+	// well past the floor — only the watermark can reclaim it.
+	old := clk.Now().Add(-30 * time.Minute)
+	frag := make([]byte, 1024)
+	for n := range uint64(64) {
+		s.Offer(testID(n), frag, old)
+	}
+
+	// Ingestion ramps up over several ticks, so usage sits under the
+	// watermark on its way up too: only a sacrifice already counted
+	// proves the watermark, and not the ramp, is what capped it.
+	require.Eventually(t, func() bool {
+		return s.Stats().EarlyExpiredSegments > 0 &&
+			s.DiskBytesTotal() > 0 && s.DiskBytesTotal() <= 32<<10
+	}, time.Second, 5*time.Millisecond, "early expiry pulls usage under the watermark")
+	st := s.Stats()
+	assert.Positive(t, st.EarlyExpiredSegments, "sacrificed segments are counted")
+	assert.Less(t, s.EffectiveWindow(), opts.Window,
+		"the gauge shows the window the watermark actually left standing")
+}

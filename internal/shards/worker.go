@@ -60,13 +60,47 @@ func (sh *shard) run(s *Set) {
 	}
 }
 
-// tick runs the shard's periodic maintenance: window expiry, then the
-// delta report of this shard's disk usage into the global total
-// (ADR-007 r5 rung 1's input, kept off the per-span hot path).
+// tick runs the shard's periodic maintenance: window expiry, the disk
+// delta report, then the watermark rung — sacrifice this shard's oldest
+// segments, oldest-first, while the global total sits above the
+// watermark, but never past the window floor (ADR-007 r5).
 func (sh *shard) tick(s *Set) {
 	now := s.opts.Now()
 	sh.buf.Expire(now)
 	sh.reportDisk(s)
+
+	limit := s.opts.DiskBudget / 100 * int64(s.opts.WatermarkPct)
+	floorCutoff := now.Add(-s.opts.WindowFloor).UnixNano()
+	atFloor := false
+	for s.diskBytes.Load() > limit {
+		tMax, ok := sh.buf.OldestFinalizedTMax()
+		if !ok || tMax >= floorCutoff {
+			// Nothing left this shard may sacrifice: either no
+			// finalized segment, or the next candidate still holds
+			// floor-protected data.
+			atFloor = true
+			break
+		}
+		freed, removed := sh.buf.ExpireOldest()
+		if !removed {
+			atFloor = true
+			break
+		}
+		s.diskBytes.Add(-freed)
+		sh.lastDiskBytes -= freed
+		s.earlyExpired.Add(1)
+	}
+	sh.atFloor.Store(atFloor)
+
+	if tMax, ok := sh.buf.OldestFinalizedTMax(); ok {
+		w := now.UnixNano() - tMax
+		if capN := int64(s.opts.Window); w > capN {
+			w = capN
+		}
+		sh.effWindow.Store(w)
+	} else {
+		sh.effWindow.Store(int64(s.opts.Window))
+	}
 }
 
 // reportDisk publishes the shard's disk-usage delta since its last
