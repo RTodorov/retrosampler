@@ -1,0 +1,41 @@
+PASS
+ok  	github.com/rtodorov/retrosampler	0.204s
+goos: darwin
+goarch: arm64
+pkg: github.com/rtodorov/retrosampler/internal/buffer
+cpu: Apple M1
+BenchmarkIngest-8      	   32806	     34592 ns/op	       345.9 ns/span	    3853 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35484	     34807 ns/op	       348.1 ns/span	    3570 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35571	     35227 ns/op	       352.3 ns/span	    4060 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35628	     34727 ns/op	       347.3 ns/span	    4053 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35306	     36606 ns/op	       366.1 ns/span	    3588 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35170	     34496 ns/op	       345.0 ns/span	    3601 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35772	     34372 ns/op	       343.7 ns/span	    4037 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35607	     34963 ns/op	       349.6 ns/span	    4056 B/op	       0 allocs/op
+BenchmarkIngest-8      	   35536	     35518 ns/op	       355.2 ns/span	    4064 B/op	       0 allocs/op
+BenchmarkIngest-8      	   34772	     34969 ns/op	       349.7 ns/span	    3635 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    8887	    126280 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    9864	    121235 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    9877	    118735 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    9836	    115818 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	   10000	    116448 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    9907	    116813 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	    9621	    116385 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	   10000	    117338 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	   10000	    116618 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-8   	   10000	    116413 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1266765	       942.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1268896	       941.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1264720	       954.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1263769	       949.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1251836	       942.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1268775	       942.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1266159	       940.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1268824	       942.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1267929	       941.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-8      	 1263589	       941.5 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/rtodorov/retrosampler/internal/buffer	50.187s
+PASS
+ok  	github.com/rtodorov/retrosampler/internal/fragmenter	0.218s
+?   	github.com/rtodorov/retrosampler/internal/metadata	[no test files]
