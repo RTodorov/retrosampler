@@ -10,4 +10,6 @@ if [[ -n "$hits" ]]; then
   echo "$hits" >&2
   exit 1
 fi
+# C9: whole-tree banned-token sweep (see banned_tokens.sh).
+scripts/banned_tokens.sh
 echo "harness integrity OK"
