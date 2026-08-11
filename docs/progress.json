@@ -25,7 +25,6 @@
   "next": [
     "TDD the processor: buffer first (ADR-006 segments+index), against ADR-004 budgets",
     "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64",
-    "optional: bump actions/checkout to v5 (Node 20 deprecation annotation)",
     "grow compose scenario: bus container + cross-instance keep assertions when bus client lands; custom fragment-splitting loadgen designed with first keep condition"
   ],
   "pending_gates": [
