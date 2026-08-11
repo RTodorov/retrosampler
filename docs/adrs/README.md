@@ -8,6 +8,12 @@ one — never edit a merged ADR.
 | --- | ------------------------------------------------ | -------- | ---------- |
 | 001 | [Harness philosophy — mechanisms over prompts](001-harness-philosophy.md) | Accepted | 2026-08-06 |
 | 002 | [Test-Driven Development discipline](002-test-driven-development.md) | Accepted | 2026-08-06 |
+| 003 | [Deployment topology and per-instance targets](003-deployment-topology.md) | Accepted | 2026-08-11 |
+| 004 | [Performance budgets are tests](004-performance-budgets.md) | Accepted | 2026-08-11 |
+| 005 | [Scope and dependency policy](005-scope-and-dependencies.md) | Accepted | 2026-08-11 |
+| 006 | [Buffer architecture — marshal-on-ingest disk segments](006-buffer-architecture.md) | Accepted | 2026-08-11 |
+| 007 | [Concurrency and overload behaviour](007-concurrency-and-overload.md) | Accepted | 2026-08-11 |
+| 008 | [Keep decisions, pending keeps, and the bus contract](008-keep-decision-semantics.md) | Accepted | 2026-08-11 |
 
 ## Conventions
 
