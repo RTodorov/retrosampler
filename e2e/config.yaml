@@ -6,6 +6,7 @@ receivers:
 
 processors:
   retrosampler:
+    storage_dir: /tmp/retrosampler-buffer
 
 exporters:
   file:
