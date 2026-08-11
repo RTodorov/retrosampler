@@ -8,7 +8,7 @@ package tools
 
 import (
 	_ "github.com/daixiang0/gci"
-	_ "github.com/evilmartians/lefthook"
+	_ "github.com/evilmartians/lefthook/v2"
 	_ "github.com/google/addlicense"
 	_ "github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen"
 	_ "go.opentelemetry.io/collector/cmd/builder"

@@ -8,7 +8,7 @@ LICENSE_HOLDER  := The retrosampler Authors
 TOOL_PKGS := \
 	go.opentelemetry.io/collector/cmd/mdatagen \
 	go.opentelemetry.io/collector/cmd/builder \
-	github.com/evilmartians/lefthook \
+	github.com/evilmartians/lefthook/v2 \
 	github.com/google/addlicense \
 	golang.org/x/vuln/cmd/govulncheck \
 	golang.org/x/perf/cmd/benchstat \
