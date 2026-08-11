@@ -1,0 +1,30 @@
+name: perf
+on:
+  workflow_dispatch:
+    inputs:
+      machine_class:
+        description: benchmark machine class (must match a committed baseline)
+        required: true
+env:
+  CGO_ENABLED: "0"
+jobs:
+  bench-gate:
+    runs-on: [self-hosted, perf]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make install-tools
+      - run: BENCH_CLASS='${{ inputs.machine_class }}' make bench-gate
+  testbed:
+    runs-on: [self-hosted, perf]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make install-tools
+      - run: make testbed
