@@ -249,6 +249,9 @@ func (b *Buffer) recoverActive(f *os.File, gen uint32, now time.Time) error {
 // Append appends frag for id to the active segment, rolling to a new
 // generation first if frag would not fit within Options.SegmentSize.
 func (b *Buffer) Append(id [16]byte, frag []byte, now time.Time) error {
+	if len(frag) > maxRecordLen {
+		return fmt.Errorf("buffer: fragment length %d exceeds max record length %d", len(frag), maxRecordLen)
+	}
 	if b.w.size > 0 && b.w.size+int64(recHeaderLen)+int64(len(frag)) > int64(b.opts.SegmentSize) {
 		if err := b.roll(); err != nil {
 			return err
