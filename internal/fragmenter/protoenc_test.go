@@ -96,7 +96,7 @@ func TestInterfaceFunctions(t *testing.T) {
 	e.fixed32F(1, 100)
 	assert.NotEmpty(t, e.b)
 
-	assert.Equal(t, 2, sizeVarintF(1, 300))
+	assert.Equal(t, 3, sizeVarintF(1, 300)) // key(1)=1 + uvarint(300)=2
 	assert.Equal(t, 0, sizeVarintF(1, 0))
 	assert.Equal(t, 9, sizeFixed64F(1, 100))
 	assert.Equal(t, 0, sizeFixed64F(1, 0))
