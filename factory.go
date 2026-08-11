@@ -29,7 +29,12 @@ func NewFactory() processor.Factory {
 }
 
 func createDefaultConfig() component.Config {
-	return &Config{Window: 5 * time.Minute, SegmentSize: 32 << 20}
+	return &Config{
+		Window:       5 * time.Minute,
+		SegmentSize:  32 << 20,
+		WatermarkPct: 80,
+		WindowFloor:  time.Minute,
+	}
 }
 
 func createTraces(ctx context.Context, set processor.Settings,
