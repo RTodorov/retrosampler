@@ -1,0 +1,83 @@
+version: "2"
+
+formatters:
+  enable: [gci, gofumpt]
+  settings:
+    gci:
+      sections: [standard, default, "prefix(github.com/rtodorov/retrosampler)"]
+    gofumpt:
+      extra-rules: true
+
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - decorder
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gocritic
+    - gosec
+    - govet
+    - misspell
+    - modernize
+    - nolintlint
+    - predeclared
+    - reassign
+    - revive
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+  settings:
+    depguard:
+      rules:
+        default:
+          list-mode: lax
+          deny:
+            - pkg: github.com/pkg/errors
+              desc: stdlib errors only (ADR-001)
+            - pkg: math/rand$
+              desc: deterministic hashing, no RNG (ADR-001/002)
+            - pkg: go.uber.org/atomic
+              desc: sync/atomic (ADR-001)
+            - pkg: github.com/hashicorp/go-multierror
+              desc: errors.Join (ADR-001)
+            - pkg: github.com/vektra/mockery
+              desc: mock frameworks banned (ADR-002 r3)
+            - pkg: go.uber.org/mock
+              desc: mock frameworks banned (ADR-002 r3)
+            - pkg: github.com/stretchr/testify/mock
+              desc: mock frameworks banned (ADR-002 r3)
+            - pkg: go.opentelemetry.io/otel/semconv
+              desc: pin exactly one semconv version via an allow entry here first (ADR-005 r4)
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^panic$
+          msg: no panic outside main (ADR-001 r12)
+        - pattern: ^os\.Exit$
+          msg: no os.Exit outside main (ADR-001 r12)
+        - pattern: ^log\.(Fatal|Fatalf|Fatalln)$
+          msg: no log.Fatal outside main (ADR-001 r12)
+        - pattern: ^time\.Now$
+          msg: inject the clock via the factory (ADR-002 r4)
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      - path: factory\.go
+        linters: [forbidigo]
+        text: time.Now
+      - path: _test\.go$
+        linters: [forbidigo]
+        text: panic
