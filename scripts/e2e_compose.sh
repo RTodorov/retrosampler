@@ -27,9 +27,9 @@ for port in 43181 43182; do
     exit 1
   }
 done
-compose run --rm loadgen-1 &
+compose run --rm -T loadgen-1 &
 p1=$!
-compose run --rm loadgen-2 &
+compose run --rm -T loadgen-2 &
 p2=$!
 wait $p1 || {
   echo "FAIL: loadgen-1 errored" >&2
