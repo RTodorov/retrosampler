@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -130,6 +131,33 @@ func TestCollectVerifiesCRC(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = b2.Close() }()
 	require.NoError(t, b2.Collect(id, func([]byte) { t.Fatal("corrupt fragment must not be visited") }))
+}
+
+func TestDiskBytesTracksSegmentLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir, Options{Window: time.Minute, SegmentSize: 64}, time.Unix(0, 0))
+	require.NoError(t, err)
+
+	assert.Zero(t, b.DiskBytes(), "empty buffer holds no bytes")
+
+	frag := make([]byte, 40) // record = 64 bytes
+	require.NoError(t, b.Append([16]byte{1}, frag, time.Unix(10, 0)))
+	assert.Equal(t, int64(64), b.DiskBytes(), "active segment counts its logical size")
+
+	require.NoError(t, b.Append([16]byte{2}, frag, time.Unix(100, 0))) // rolls segment 1
+	fi, err := os.Stat(filepath.Join(dir, "000000001.seg"))
+	require.NoError(t, err)
+	assert.Equal(t, fi.Size()+64, b.DiskBytes(), "finalized counts real file size incl. footer")
+
+	// Recovery reproduces the same accounting.
+	require.NoError(t, b.Close())
+	b2, err := Open(dir, Options{Window: time.Minute, SegmentSize: 64}, time.Unix(100, 0))
+	require.NoError(t, err)
+	defer func() { _ = b2.Close() }()
+	assert.Equal(t, fi.Size()+64, b2.DiskBytes(), "recovery restores accounting")
+
+	b2.Expire(time.Unix(71, 0)) // cutoff 11s: segment 1 (tMax 10s) goes
+	assert.Equal(t, int64(64), b2.DiskBytes(), "expiry subtracts the removed file")
 }
 
 func TestCollectSkipsCorruptLengthLoc(t *testing.T) {

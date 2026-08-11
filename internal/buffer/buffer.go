@@ -62,6 +62,9 @@ type Buffer struct {
 	// entries are folded into idx on load/roll and not retained here.
 	metas map[uint32]segMeta
 
+	// finalizedBytes sums metas' file sizes; DiskBytes adds the active segment.
+	finalizedBytes int64
+
 	// minGen is the oldest generation still considered live; Collect
 	// skips locs with gen < minGen. Task 9's Expire advances it.
 	minGen uint32
@@ -183,7 +186,13 @@ func (b *Buffer) recover(gens []uint32, now time.Time) error {
 			for _, e := range meta.entries {
 				b.idx.put(e.id, loc{gen: gen, off: e.off, length: e.length})
 			}
-			b.metas[gen] = segMeta{gen: gen, tMin: meta.tMin, tMax: meta.tMax}
+			fi, statErr := f.Stat()
+			if statErr != nil {
+				_ = f.Close()
+				return fmt.Errorf("buffer: stat segment %d: %w", gen, statErr)
+			}
+			b.metas[gen] = segMeta{gen: gen, tMin: meta.tMin, tMax: meta.tMax, size: fi.Size()}
+			b.finalizedBytes += fi.Size()
 			b.readers[gen] = f
 			continue
 		}
@@ -281,8 +290,13 @@ func (b *Buffer) roll() error {
 	if err != nil {
 		return fmt.Errorf("buffer: open finalized segment %d: %w", gen, err)
 	}
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("buffer: stat finalized segment %d: %w", gen, err)
+	}
 	b.readers[gen] = f
-	b.metas[gen] = segMeta{gen: gen, tMin: tMin, tMax: tMax}
+	b.metas[gen] = segMeta{gen: gen, tMin: tMin, tMax: tMax, size: fi.Size()}
+	b.finalizedBytes += fi.Size()
 
 	if b.activeReader != nil {
 		if cerr := b.activeReader.Close(); cerr != nil {
@@ -416,6 +430,7 @@ func (b *Buffer) removeSegment(gen uint32) bool {
 		_ = r.Close()
 		delete(b.readers, gen)
 	}
+	b.finalizedBytes -= b.metas[gen].size
 	delete(b.metas, gen)
 	b.minGen = gen + 1
 	return true
@@ -431,6 +446,12 @@ func (b *Buffer) oldestFinalized() (gen uint32, meta segMeta, ok bool) {
 		}
 	}
 	return gen, meta, !first
+}
+
+// DiskBytes returns the buffer's on-disk footprint: finalized segment
+// files (including footers) plus the active segment's logical size.
+func (b *Buffer) DiskBytes() int64 {
+	return b.finalizedBytes + b.w.size
 }
 
 // Close flushes and fsyncs the active segment and closes every open file
