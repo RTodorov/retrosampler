@@ -5,6 +5,7 @@ package retrosampler
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
@@ -25,7 +26,7 @@ func NewFactory() processor.Factory {
 }
 
 func createDefaultConfig() component.Config {
-	return &Config{}
+	return &Config{Window: 5 * time.Minute, SegmentSize: 32 << 20}
 }
 
 func createTraces(ctx context.Context, set processor.Settings,
