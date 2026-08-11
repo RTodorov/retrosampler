@@ -6,6 +6,7 @@ package buffer
 import (
 	"bytes"
 	"io"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -129,4 +130,21 @@ func TestCollectVerifiesCRC(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = b2.Close() }()
 	require.NoError(t, b2.Collect(id, func([]byte) { t.Fatal("corrupt fragment must not be visited") }))
+}
+
+func TestCollectSkipsCorruptLengthLoc(t *testing.T) {
+	b, err := Open(t.TempDir(), Options{Window: time.Minute}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	id := [16]byte{1}
+	require.NoError(t, b.Append(id, []byte("real"), time.Unix(1, 0)))
+	// A loc with an impossible length models index corruption from a
+	// hostile or torn recovery source: Collect must skip it, not size a
+	// 2 GiB read buffer from it.
+	b.idx.put(id, loc{gen: b.w.gen, off: 0, length: math.MaxUint32})
+
+	visits := 0
+	require.NoError(t, b.Collect(id, func([]byte) { visits++ }))
+	assert.Equal(t, 1, visits, "the real fragment is visited, the corrupt loc skipped")
 }
