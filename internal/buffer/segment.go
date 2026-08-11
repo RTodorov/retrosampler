@@ -12,9 +12,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 const (
@@ -33,7 +30,7 @@ func i64FromU64(u uint64) (v int64, ok bool) {
 	if u > math.MaxInt64 {
 		return 0, false
 	}
-	// Guard for gosec: after the range check, u is guaranteed safe for int64 conversion.
+	// u <= MaxInt64 here, so the conversion cannot overflow or change sign.
 	return int64(u), true
 }
 
@@ -43,33 +40,8 @@ func u64FromI64(v int64) (u uint64, ok bool) {
 	if v < 0 {
 		return 0, false
 	}
-	// Guard for gosec: after the range check, v is guaranteed safe for uint64 conversion.
+	// v >= 0 here, so the conversion preserves its value exactly.
 	return uint64(v), true
-}
-
-// u32FromU64 converts a uint64 to uint32, guarding against truncation.
-// ok is false for out-of-range input.
-func u32FromU64(u uint64) (v uint32, ok bool) {
-	if u > math.MaxUint32 {
-		return 0, false
-	}
-	// Guard for gosec: after the range check, u is guaranteed safe for uint32 conversion.
-	return uint32(u), true
-}
-
-// genFromPath extracts the generation number encoded in a segPath-formatted
-// file name (best-effort; 0 if the name doesn't match).
-func genFromPath(name string) uint32 {
-	base := strings.TrimSuffix(filepath.Base(name), ".seg")
-	n, err := strconv.ParseUint(base, 10, 32)
-	if err != nil {
-		return 0
-	}
-	g, ok := u32FromU64(n)
-	if !ok {
-		return 0
-	}
-	return g
 }
 
 // dirEntry locates one record within a segment: its trace ID, byte offset
@@ -93,7 +65,10 @@ type segmentWriter struct {
 	hdr  [recHeaderLen]byte
 }
 
-// segMeta is the parsed footer of a finalized segment.
+// segMeta is the parsed footer of a finalized segment. gen is not parsed
+// from the file — readFooter always returns it zero. The caller already
+// knows the generation (it opened the file at a segPath-formatted path, or
+// created the segmentWriter with that gen) and must set segMeta.gen itself.
 type segMeta struct {
 	gen     uint32
 	tMin    int64
@@ -212,6 +187,9 @@ func (s *segmentWriter) finalize() (dir []dirEntry, err error) {
 // errNoFooter if the trailer is absent, its magic/CRC is invalid, or the
 // footer offset/entry count is inconsistent with the file size (torn
 // segment: process crashed mid-write, before finalize completed).
+//
+// The returned segMeta.gen is always zero: readFooter has no reliable way
+// to learn the generation from f alone. The caller must set it.
 func readFooter(f *os.File) (segMeta, error) {
 	fi, err := f.Stat()
 	if err != nil {
@@ -266,7 +244,9 @@ func readFooter(f *os.File) (segMeta, error) {
 		entries[i].off = binary.LittleEndian.Uint32(b[16:20])
 		entries[i].length = binary.LittleEndian.Uint32(b[20:24])
 	}
-	return segMeta{gen: genFromPath(f.Name()), tMin: tMin, tMax: tMax, entries: entries}, nil
+	// gen is intentionally left zero: readFooter has no reliable source for
+	// it from f alone (see segMeta's doc comment); the caller sets it.
+	return segMeta{gen: 0, tMin: tMin, tMax: tMax, entries: entries}, nil
 }
 
 // scanRecords walks records from offset 0, validating each record's CRC,
