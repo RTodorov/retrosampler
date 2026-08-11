@@ -48,6 +48,34 @@ func TestExpireRollsStaleActiveSegment(t *testing.T) {
 	assert.Greater(t, b.MinLiveGen(), uint32(1))
 }
 
+func TestExpireBestEffortClosesWedgedReader(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir, Options{Window: 8 * time.Second, SegmentSize: 1 << 20}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	frag := bytes.Repeat([]byte("x"), 512<<10)
+	require.NoError(t, b.Append([16]byte{1}, frag, time.Unix(1, 0)))
+	require.NoError(t, b.Append([16]byte{2}, frag, time.Unix(2, 0))) // rolls: gen1 finalized (tMax=1), gen2 active (tMax=2)
+
+	// Pre-close gen1's finalized reader so deleteExpired's own Close call on
+	// it errors, simulating whatever made the handle unusable.
+	require.NoError(t, b.readers[1].Close())
+
+	// cutoff=2: gen1 (tMax=1) is stale, gen2 (tMax=2) is not, so only gen1
+	// is a deleteExpired candidate here — isolates the close-error path.
+	b.Expire(time.Unix(10, 0))
+
+	_, stillTracked := b.readers[1]
+	assert.False(t, stillTracked, "a wedged reader must still be dropped from the map (best-effort close)")
+	assert.Equal(t, uint32(2), b.MinLiveGen(), "minGen must advance past the deleted segment despite the close error")
+	files, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
+	assert.Len(t, files, 1, "expired segment file must still be removed despite the close error")
+
+	// A retry (the old wedge point) must be a no-op, not an error loop.
+	b.Expire(time.Unix(10, 0))
+}
+
 func TestExpireSweepsIndex(t *testing.T) {
 	b, err := Open(t.TempDir(), Options{Window: 10 * time.Second, SweepChunk: 1 << 20}, time.Unix(0, 0))
 	require.NoError(t, err)
