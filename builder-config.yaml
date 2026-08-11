@@ -1,0 +1,15 @@
+dist:
+  name: retrosamplercol
+  description: retrosampler e2e collector
+  output_path: ./bin/ocb-dist
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.158.0
+processors:
+  - gomod: github.com/rtodorov/retrosampler v0.0.0
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.158.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.158.0
+
+replaces:
+  - github.com/rtodorov/retrosampler => ../..

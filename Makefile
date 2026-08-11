@@ -40,7 +40,8 @@ generate:
 	go generate ./...
 
 build:
-	builder --config builder-config.yaml
+	mkdir -p bin
+	$(TOOLS_DIR)/builder --config builder-config.yaml
 	cp bin/ocb-dist/retrosamplercol bin/retrosamplercol
 
 e2e: build
@@ -53,7 +54,7 @@ golden:
 	@echo "regenerate goldens per package: go test <pkg> -update" >&2; exit 1
 
 vuln:
-	govulncheck ./...
+	$(TOOLS_DIR)/govulncheck ./...
 
 bench:
 	go test -run '^$$' -bench '^(BenchmarkIngest|BenchmarkKeepFlush|BenchmarkExpiry)$$' \

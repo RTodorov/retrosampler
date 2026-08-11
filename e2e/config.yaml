@@ -1,0 +1,22 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:43170
+
+processors:
+  retrosampler:
+
+exporters:
+  file:
+    path: e2e/out/traces.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [retrosampler]
+      exporters: [file]
+  telemetry:
+    metrics:
+      level: none
