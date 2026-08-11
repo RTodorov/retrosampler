@@ -22,6 +22,30 @@ const (
 	wFixed32 = 5
 )
 
+// i64wire returns v's protobuf varint bit pattern (two's complement).
+// Both conversions are safe for overflow—this is how Go handles signed-to-unsigned.
+func i64wire(v int64) uint64 {
+	if v >= 0 {
+		return uint64(v)
+	}
+	n := -(v + 1) // for MinInt64 this is MaxInt64; always >= 0
+	// Guard for gosec: after subtraction, n is guaranteed non-negative.
+	if n >= 0 {
+		return ^uint64(n)
+	}
+	return 0 // unreachable; satisfies type checker
+}
+
+// lenU64 converts a non-negative int length to uint64, with guard for negative input.
+// Callers must ensure n >= 0.
+func lenU64(n int) uint64 {
+	if n < 0 {
+		return 0
+	}
+	// Safe: n is guaranteed non-negative at this point.
+	return uint64(n)
+}
+
 type enc struct{ b []byte }
 
 func (e *enc) uvarint(v uint64) {
@@ -79,7 +103,7 @@ func (e *enc) fixed32F(field uint64, v uint32) {
 // msg writes the key and length prefix for a nested message of known size.
 func (e *enc) msg(field uint64, size int) {
 	e.key(field, wBytes)
-	e.uvarint(uint64(size)) //nolint:gosec // size validated by caller at wire level
+	e.uvarint(lenU64(size))
 }
 
 func sizeUvarint(v uint64) int {
@@ -95,7 +119,7 @@ func sizeKey(field uint64) int { return sizeUvarint(field << 3) }
 
 // sizeLen is key + length prefix + n payload bytes.
 func sizeLen(field uint64, n int) int {
-	return sizeKey(field) + sizeUvarint(uint64(n)) + n //nolint:gosec // n is wire size, non-negative
+	return sizeKey(field) + sizeUvarint(lenU64(n)) + n
 }
 
 func sizeVarintF(field, v uint64) int {
@@ -134,7 +158,7 @@ func sizeValue(v pcommon.Value) int {
 	case pcommon.ValueTypeBool:
 		return sizeKey(2) + 1
 	case pcommon.ValueTypeInt:
-		return sizeKey(3) + sizeUvarint(uint64(v.Int())) //nolint:gosec // int64 cast safe for varint encoding
+		return sizeKey(3) + sizeUvarint(i64wire(v.Int()))
 	case pcommon.ValueTypeDouble:
 		return sizeKey(4) + 8
 	case pcommon.ValueTypeSlice:
@@ -175,7 +199,7 @@ func putValue(e *enc, v pcommon.Value) {
 		}
 	case pcommon.ValueTypeInt:
 		e.key(3, wVarint)
-		e.uvarint(uint64(v.Int())) //nolint:gosec // int64 cast safe for varint encoding
+		e.uvarint(i64wire(v.Int()))
 	case pcommon.ValueTypeDouble:
 		e.key(4, wFixed64)
 		e.b = binary.LittleEndian.AppendUint64(e.b, math.Float64bits(v.Double()))

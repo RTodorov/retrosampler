@@ -70,7 +70,9 @@ func TestAttrEncodingRoundTrip(t *testing.T) {
 	})
 	got2 := got.AsRaw()
 	assert.Equal(t, "v", got2["s"])
-	assert.Empty(t, got2["empty"])
+	emptyVal, ok := got2["empty"]
+	assert.True(t, ok, "empty-string attr must survive the round trip")
+	assert.Empty(t, emptyVal)
 	assert.Equal(t, int64(-3), got2["i"])
 	assert.Equal(t, int64(0), got2["zero"])
 	assert.Equal(t, false, got2["b"])
@@ -85,16 +87,19 @@ func TestInterfaceFunctions(t *testing.T) {
 	var e enc
 
 	// These functions are part of the interface for Task 3 span/group encoder.
+	// varintF(1, 100): key 1<<3|0 = 0x08, uvarint(100) = 0x64
 	e.varintF(1, 100)
-	assert.NotEmpty(t, e.b)
+	assert.Equal(t, []byte{0x08, 0x64}, e.b)
 
+	// fixed64F(1, 100): key 1<<3|1 = 0x09, uint64 100 LE
 	e.b = e.b[:0]
 	e.fixed64F(1, 100)
-	assert.NotEmpty(t, e.b)
+	assert.Equal(t, []byte{0x09, 100, 0, 0, 0, 0, 0, 0, 0}, e.b)
 
+	// fixed32F(1, 100): key 1<<3|5 = 0x0D, uint32 100 LE
 	e.b = e.b[:0]
 	e.fixed32F(1, 100)
-	assert.NotEmpty(t, e.b)
+	assert.Equal(t, []byte{0x0D, 100, 0, 0, 0}, e.b)
 
 	assert.Equal(t, 3, sizeVarintF(1, 300)) // key(1)=1 + uvarint(300)=2
 	assert.Equal(t, 0, sizeVarintF(1, 0))
