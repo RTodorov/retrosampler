@@ -81,6 +81,82 @@ func TestIndexReuseAfterSweepThenReinsert(t *testing.T) {
 	assert.Equal(t, uint32(9), x.at(h).off)
 }
 
+// TestHashKeyDistributesAdversarialIDs guards against a Fibonacci-hashing
+// pitfall: multiplication's carry propagates low-to-high, so a product's low
+// bits depend only on the low bits of its input. Two constructions that
+// collapse a hash extracting low bits from a low-8-bytes-only input into a
+// single start slot:
+//   - shared low 8 id bytes, varying high 8 (a hash that reads only id[:8]
+//     hashes every one of these identically)
+//   - shared high 8 id bytes and low 4 of the low 8, varying only the top 4
+//     bytes of the low 8 (id[:8] as a uint64 is then i<<32 for varying i;
+//     any extraction of LOW bits from (i<<32)*seed is 0 for every i, since
+//     those bits never receive a carry from the zero low half)
+//
+// Real trace IDs carry a time prefix in their first bytes, which lands in
+// the low bits of LE.Uint64(id[:8]) — this is exactly the second
+// construction, and is why the fix must read the high bits of the product.
+func TestHashKeyDistributesAdversarialIDs(t *testing.T) {
+	const n = 10_000
+	x := newIndex()
+	// A representative grown table size, set directly so the measurement
+	// isolates hash quality from put's load-factor-triggered growth.
+	x.slots = make([]slot, 32768)
+
+	distinct := func(mk func(i int) [16]byte) int {
+		seen := make(map[int]struct{}, n)
+		for i := range n {
+			seen[x.startSlot(mk(i))] = struct{}{}
+		}
+		return len(seen)
+	}
+
+	sharedLow := distinct(func(i int) [16]byte {
+		var id [16]byte
+		binary.LittleEndian.PutUint64(id[8:], lenU64(i))
+		return id
+	})
+	assert.Greater(t, sharedLow, n/2,
+		"hash must depend on the high 8 id bytes, not just the low 8")
+
+	topBytesVary := distinct(func(i int) [16]byte {
+		var id [16]byte
+		binary.LittleEndian.PutUint32(id[4:8], lenU32(i))
+		return id
+	})
+	assert.Greater(t, topBytesVary, n/2,
+		"hash must expose high-order product bits: varying only the low half's top bytes must not collide")
+}
+
+// TestIndexPutGetAdversarialIDs is the correctness half of the same guard:
+// table operations must stay correct across both adversarial id families
+// from TestHashKeyDistributesAdversarialIDs, at a scale (10k) that would
+// visibly thrash under a collapsed single probe chain.
+func TestIndexPutGetAdversarialIDs(t *testing.T) {
+	const n = 10_000
+	check := func(mk func(i int) [16]byte) {
+		x := newIndex()
+		for i := range n {
+			x.put(mk(i), loc{gen: 1, off: lenU32(i), length: 1})
+		}
+		for i := range n {
+			h := x.head(mk(i))
+			require.GreaterOrEqual(t, h, int32(0))
+			assert.Equal(t, lenU32(i), x.at(h).off)
+		}
+	}
+	check(func(i int) [16]byte {
+		var id [16]byte
+		binary.LittleEndian.PutUint64(id[8:], lenU64(i))
+		return id
+	})
+	check(func(i int) [16]byte {
+		var id [16]byte
+		binary.LittleEndian.PutUint32(id[4:8], lenU32(i))
+		return id
+	})
+}
+
 // TestIndexStructSizes pins the slot/loc layouts that memoryBytes' 24/16
 // constants assume (ADR-006 r5 index budget).
 func TestIndexStructSizes(t *testing.T) {
