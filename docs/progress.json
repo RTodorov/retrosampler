@@ -1,6 +1,15 @@
 {
-  "phase": "scaffolded-harness",
+  "phase": "stage-1-buffer-core",
   "updated": "2026-08-11",
+  "roadmap": [
+    "1 buffer core: fragmenter + segment store + index (spec: docs/superpowers/specs/2026-08-11-buffer-core-design.md)",
+    "2 shard layer + overload ladder (ADR-007)",
+    "3 decision plane + flush: decided set, pending keeps, bus iface + fake, keep-on-error built-in; e2e keep loop works here (ADR-008)",
+    "4 keep detection: baggage T0/elapsed_ms, zero-alloc built-ins, OTTL rules (ADR-008)",
+    "5 config surface: every field wired + reflection test (ADR-005)",
+    "6 integration hardening: real bus in compose, cross-instance asserts, fragment-splitting loadgen, testbed, W validation",
+    "bridge: stages 1-2 shadow mode (buffer AND pass through) so compose conservation asserts hold until stage 3"
+  ],
   "done": [
     "ADR-001 harness philosophy",
     "ADR-002 TDD discipline",
@@ -23,7 +32,7 @@
     "2026-08-11 compose e2e gate: 2-instance topology (retrosampler-1/2, distroless image from host-cross-compiled ocb binary), pinned telemetrygen paced load, exact span-conservation assertions (10000/instance), make e2e-compose + CI job; failure path proven"
   ],
   "next": [
-    "TDD the processor: buffer first (ADR-006 segments+index), against ADR-004 budgets",
+    "write implementation plan for buffer-core spec (superpowers writing-plans), then TDD per spec sequence",
     "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64",
     "grow compose scenario: bus container + cross-instance keep assertions when bus client lands; custom fragment-splitting loadgen designed with first keep condition"
   ],
