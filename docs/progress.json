@@ -1,5 +1,5 @@
 {
-  "phase": "pre-scaffold",
+  "phase": "scaffolded-harness",
   "updated": "2026-08-11",
   "done": [
     "ADR-001 harness philosophy",
@@ -12,12 +12,32 @@
     "ADR-006 buffer: marshal-on-ingest disk segments, index budget 150 B/trace",
     "ADR-007 concurrency: shard single-writer; overload: shrink window to floor then backpressure",
     "ADR-008 keep semantics: decided-set idempotency, deterministic baseline, operator-chosen bus delivery",
-    "spike 2: OTTL condition cost per span (2026-08-11): simple compares 28-56ns/0-1 alloc, Int(string attr) 94ns/3 allocs, regex 112ns/2 allocs, 4-chain 213ns/5 allocs; typed equivalent 15ns/0 — led to built-ins (span latency, elapsed_ms, trace age now-T0, baseline — the guaranteed-zero-alloc set) + OTTL-only user rules, recorded in ADR-008"
+    "spike 2: OTTL condition cost per span (2026-08-11): simple compares 28-56ns/0-1 alloc, Int(string attr) 94ns/3 allocs, regex 112ns/2 allocs, 4-chain 213ns/5 allocs; typed equivalent 15ns/0 — led to built-ins (span latency, elapsed_ms, trace age now-T0, baseline — the guaranteed-zero-alloc set) + OTTL-only user rules, recorded in ADR-008",
+    "2026-08-11 scaffold+harness session: go module github.com/rtodorov/retrosampler; metadata.yaml + mdatagen v0.158.0; passthrough factory TDD, 100% coverage; internal/tools module pins all build tools",
+    "harness layer 1 (claude hooks, active next session): pretool guard (protected paths, //nolint, t.Skip), bash guard (--no-verify, LEFTHOOK=, hooksPath), posttool gofumpt+gci+lint-to-context, stop gate build+lint+race+generate-diff with green-marker skip, session-start context injection; all fixture-tested",
+    "harness layer 2 (lefthook v2.1.10 brew runtime + pinned): pre-commit lint-changed/build/license/generated-sync/adr-discipline, commit-msg conventional regex, pre-push race tests; rejection and pass paths proven live",
+    "harness layer 3 (CI, authored, unverified — no remote yet): ci.yml test+coverage-floor-80/generate-check/vuln/license/e2e/commit-range/integrity-grep, perf.yml dispatch-only self-hosted bench-gate+testbed; actionlint clean",
+    "e2e green: ocb-built retrosamplercol ran otlp->retrosampler->file with telemetrygen traces",
+    "perf gate scripts: bench_gate.sh (benchstat, >10% time or any alloc regression, per-class baselines benchmarks/baseline-<class>.txt, class file benchmarks/CLASS=m-arm64), fails loudly with no benchmarks/baseline; make testbed fails loudly until scenario lands"
   ],
   "next": [
-    "user review of ADRs 003-008",
-    "scaffolding session: repo layout, metadata.yaml, .golangci.yml (ADR-001 rule 3 + ADR-002 rule 10 entries), lefthook, Makefile, CI — the enforcing mechanisms deferred from this session",
-    "then TDD the processor: buffer first (ADR-006), against ADR-004 budgets"
+    "push to github.com/rtodorov/retrosampler and verify CI workflows",
+    "TDD the processor: buffer first (ADR-006 segments+index), against ADR-004 budgets",
+    "first benchmarks (BenchmarkIngest/KeepFlush/Expiry) then make bench-baseline on m-arm64"
+  ],
+  "pending_gates": [
+    {"gate": "hot-path allocs/span = 0 via testing.AllocsPerRun", "adr": "004 r2"},
+    {"gate": "OTTL-policy benchmark variant with own committed baseline", "adr": "004 r2, 008 r2"},
+    {"gate": "index <=150 B/live-trace budget test", "adr": "006 r5"},
+    {"gate": "Shutdown(ctx) deadline + flush test", "adr": "001 r12, 007 r6"},
+    {"gate": "goleak static goroutine census (TestMain landed at scaffold)", "adr": "007 r7"},
+    {"gate": "torn-tail CRC truncation / restart index rebuild test", "adr": "006 r6"},
+    {"gate": "decided-set idempotency: duplicate keeps, no duplicate flush/publish", "adr": "008 r5"},
+    {"gate": "overload ladder: watermark early-expiry, floor retryable error, queue-full retryable error, every shed counted", "adr": "007 r5"},
+    {"gate": "every-config-field-exercised reflection test", "adr": "005 r6"},
+    {"gate": "deterministic baseline: identical hash verdict across instances", "adr": "003 r6, 008 r1"},
+    {"gate": "verdict-before-spans race: keep with no buffered spans records decided", "adr": "008 r4"},
+    {"gate": "skew clamp: negative durations -> 0", "adr": "008 r7"}
   ],
   "open_decisions": [
     "bus technology + placement (ops, at provisioning; contract fixed in ADR-008)",
