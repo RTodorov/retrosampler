@@ -75,37 +75,46 @@ func (p *shadowProcessor) expireLoop() {
 		select {
 		case <-p.stop:
 			return
-		case now := <-t.C:
+		case <-t.C:
 			p.mu.Lock()
-			p.buf.Expire(now)
+			if p.buf != nil {
+				p.buf.Expire(p.now())
+			}
 			p.mu.Unlock()
 		}
 	}
 }
 
 func (p *shadowProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptrace.Traces, error) {
-	if p.buf == nil {
-		return td, nil
-	}
 	now := p.now()
 	p.mu.Lock()
-	p.frag.Fragment(td, func(id pcommon.TraceID, frag []byte) {
-		if err := p.buf.Append(id, frag, now); err != nil {
-			// Shadow mode: buffering failure must never fail the pipeline.
-			p.logger.Debug("retrosampler: shadow append failed", zap.Error(err))
-		}
-	})
+	buf := p.buf
+	if buf != nil {
+		p.frag.Fragment(td, func(id pcommon.TraceID, frag []byte) {
+			if err := buf.Append(id, frag, now); err != nil {
+				// Shadow mode: buffering failure must never fail the pipeline.
+				p.logger.Debug("retrosampler: shadow append failed", zap.Error(err))
+			}
+		})
+	}
 	p.mu.Unlock()
 	return td, nil
 }
 
+// shutdown is idempotent: the check-and-clear of p.buf happens atomically
+// under the mutex, so a second call (or a concurrent one) sees buf == nil
+// and returns immediately instead of double-closing p.stop. expireLoop and
+// processTraces both read p.buf under the same mutex, so nilling it here
+// also closes the race against their access to a buffer mid-Close.
 func (p *shadowProcessor) shutdown(context.Context) error {
-	if p.buf == nil {
+	p.mu.Lock()
+	buf := p.buf
+	p.buf = nil
+	p.mu.Unlock()
+	if buf == nil {
 		return nil
 	}
 	close(p.stop)
 	<-p.done
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.buf.Close()
+	return buf.Close()
 }
