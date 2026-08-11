@@ -5,6 +5,8 @@ export PATH     := $(TOOLS_DIR):$(PATH)
 MODULE          := github.com/rtodorov/retrosampler
 LICENSE_HOLDER  := The retrosampler Authors
 
+GOLANGCI_LINT_V := v2.8.0
+
 TOOL_PKGS := \
 	go.opentelemetry.io/collector/cmd/mdatagen \
 	go.opentelemetry.io/collector/cmd/builder \
@@ -22,12 +24,14 @@ TOOL_PKGS := \
 install-tools:
 	mkdir -p $(TOOLS_DIR)
 	cd internal/tools && GOBIN=$(TOOLS_DIR) GOFLAGS=-tags=tools go install $(TOOL_PKGS)
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+	  | sh -s -- -b $(TOOLS_DIR) $(GOLANGCI_LINT_V)
 
 fmt:
-	golangci-lint fmt
+	$(TOOLS_DIR)/golangci-lint fmt
 
 lint:
-	golangci-lint run
+	$(TOOLS_DIR)/golangci-lint run
 
 test:
 	go test -race ./...
