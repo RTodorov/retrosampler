@@ -21,6 +21,8 @@ const hashSeed = 0x9E3779B97F4A7C15
 
 // lenU64 converts a non-negative int to uint64, with guard for negative
 // input (gosec G115). Returns 0 for negative input.
+// Structural invariant: input derives from len(x.slots), a power-of-two
+// table size, so it is always non-negative.
 func lenU64(n int) uint64 {
 	if n < 0 {
 		return 0
@@ -31,6 +33,8 @@ func lenU64(n int) uint64 {
 
 // tableMask returns n-1 as a uint64 bitmask for an open-addressing table of
 // size n (a power of two, always >= 1). Returns 0 for n <= 0.
+// Structural invariant: input derives from len(x.slots), a power-of-two
+// table size, so it is always > 0.
 func tableMask(n int) uint64 {
 	if n <= 0 {
 		return 0
@@ -41,6 +45,8 @@ func tableMask(n int) uint64 {
 
 // probeIdx converts a masked probe position (always < len(x.slots), a
 // bounded int) to an int slot index. Returns 0 if out of int range.
+// Structural invariant: input derives from len(x.slots), a power-of-two
+// table size, so it never exceeds MaxInt in practice.
 func probeIdx(v uint64) int {
 	if v > math.MaxInt {
 		return 0

@@ -20,6 +20,8 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // lenU32 converts a non-negative int length to uint32, with guard for overflow.
 // Returns 0 for negative or out-of-range input (> MaxUint32).
 // Callers must ensure 0 <= n <= math.MaxUint32.
+// Unreachable in practice: every caller's input is bounded by the 1 GiB
+// segment-size cap (maxSegmentSize).
 func lenU32(n int) uint32 {
 	if n < 0 || n > math.MaxUint32 {
 		return 0

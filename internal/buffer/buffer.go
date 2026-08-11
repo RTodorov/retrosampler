@@ -94,16 +94,17 @@ func parseSegGen(name string) (gen uint32, ok bool) {
 	return uint32(n), true
 }
 
-// fragBufLen converts a uint32 fragment length to the int size of its
-// on-disk record (header + payload), guarding uint32->int truncation
-// (gosec G115) on platforms where int is 32 bits.
-func fragBufLen(length uint32) int {
+// fragBufLen converts a fragment length from the index to the int size of
+// its on-disk record (header + payload). ok is false for lengths that
+// cannot be a real record (> MaxInt32): index lengths come from disk
+// recovery, so they are not trusted.
+func fragBufLen(length uint32) (n int, ok bool) {
 	if length > math.MaxInt32 {
-		return 0
+		return 0, false
 	}
-	// Guard above: length <= MaxInt32, so header+payload fits in an int on
-	// every platform Go supports (int is at least 32 bits).
-	return recHeaderLen + int(length)
+	// length <= MaxInt32 here, so header+payload fits in an int on every
+	// platform Go supports (int is at least 32 bits).
+	return recHeaderLen + int(length), true
 }
 
 // Open creates or recovers a buffer in dir. now anchors recovered
@@ -314,7 +315,11 @@ func (b *Buffer) Collect(id [16]byte, visit func(frag []byte)) error {
 			return err
 		}
 
-		need := fragBufLen(l.length)
+		need, lenOK := fragBufLen(l.length)
+		if !lenOK {
+			i = l.next
+			continue
+		}
 		if cap(b.readBuf) < need {
 			b.readBuf = make([]byte, need)
 		}
