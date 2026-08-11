@@ -6,7 +6,6 @@ package shards
 import (
 	"bytes"
 	"context"
-	"runtime"
 	"testing"
 	"time"
 
@@ -17,19 +16,25 @@ import (
 // TestOfferZeroAllocs gates the stage-2 routing hot path (ADR-004 r2):
 // hashing, free-ring handoff, and the fragment copy must cost 0
 // allocations once every recycled buffer has grown to the high-water
-// fragment size. Workers run concurrently; their append path is
-// zero-alloc warm as well (stage-1 gate), so the global measurement
-// stays clean. Tick is inert during measurement.
+// fragment size.
 //
-// The Gosched is load-bearing, not decoration. AllocsPerRun pins
-// GOMAXPROCS to 1 for the measurement and Offer never blocks, so a bare
-// offer loop starves the workers: the free ring empties after queueDepth
-// offers per shard and every later Offer takes the queue-full shed
-// early-return, which returns before the copy. Measured that way the
-// gate is hollow — verified by mutation, an allocating
-// `append([]byte(nil), frag...)` copy still reported 0 without the
-// yield, and 1 alloc/Offer with it. The shed-budget assertion below
-// holds the measurement to the real path.
+// Shape matters here, because the obvious shape gates nothing.
+// AllocsPerRun pins GOMAXPROCS to 1 and Offer never blocks, so a loop
+// that offers faster than the workers drain empties the free ring and
+// every later Offer takes the queue-full shed early-return — which
+// returns before the copy. Mutation-verified: with the ring empty, an
+// allocating `append([]byte(nil), frag...)` copy still measured 0.
+// Worse, whether the ring empties depends on whether the workers win CPU
+// and disk, so the same test flips between gating and not: under `go
+// test ./...` package parallelism a 64-offers-per-run version shed all
+// 6464 offers in some runs and none in others.
+//
+// So the measured window is sized to need no recycling at all: one Offer
+// per run, ids rotating, 101 calls over 4 shards — about 25 per shard
+// against a 64-buffer ring. The ring is full when the measurement starts
+// (waited for below) and cannot run dry, whatever the workers are doing.
+// That makes the shed count deterministically 0 rather than a budget,
+// and the gate load-independent.
 func TestOfferZeroAllocs(t *testing.T) {
 	const nIDs, nRuns = 64, 100
 
@@ -45,28 +50,37 @@ func TestOfferZeroAllocs(t *testing.T) {
 		ids[n] = testID(n)
 	}
 	now := clk.Now()
-	for range 200 { // warm every free-ring buffer past 512 bytes
+	// Warm every free-ring buffer past 512 bytes: the first queueDepth
+	// offers to a shard take all of its buffers, so one pass suffices, and
+	// the rest warms the workers' own high-water marks (index arena,
+	// segment directory) well past anything the measurement can trigger.
+	for range 200 {
 		for _, id := range ids {
 			s.Offer(id, frag, now)
-			runtime.Gosched()
 		}
 	}
+	require.Eventually(t, func() bool {
+		for _, sh := range s.shards {
+			if len(sh.free) < queueDepth {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, time.Millisecond,
+		"workers must recycle every handoff buffer before the measurement")
 
 	before := s.Stats()
+	i := 0
 	avg := testing.AllocsPerRun(nRuns, func() {
-		for _, id := range ids {
-			s.Offer(id, frag, now)
-			runtime.Gosched()
-		}
+		s.Offer(ids[i%nIDs], frag, now)
+		i++
 	})
 	after := s.Stats()
 
 	assert.Zero(t, avg, "ADR-004 r2: 0 allocs on route+enqueue")
 	assert.Zero(t, after.AppendErrors, "every handed-off fragment must land")
-	// AllocsPerRun makes one unmeasured warm-up call on top of nRuns. A
-	// worker that misses its turn can cost a shard one ring slot, so the
-	// budget is 5% rather than 0; the hollow mode this guards against
-	// sheds 100%.
-	assert.Less(t, after.ShedQueueFull-before.ShedQueueFull, uint64(nIDs*(nRuns+1)/20),
+	assert.Equal(t, before.ShedQueueFull, after.ShedQueueFull,
 		"measurement must ride the copy+handoff path, not the queue-full shed")
+	assert.Equal(t, before.ShedFloor, after.ShedFloor,
+		"measurement must ride the copy+handoff path, not the floor shed")
 }
