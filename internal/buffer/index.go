@@ -10,6 +10,11 @@ import (
 
 const initialSlots = 1024
 
+// arenaCompactFloor is the minimum arena length before sweep considers
+// compacting it. Below this, the free list can't hold enough slack to be
+// worth the O(live) rebuild.
+const arenaCompactFloor = 1024
+
 // hashSeed is the multiplicative hash constant (Fibonacci hashing).
 const hashSeed = 0x9E3779B97F4A7C15
 
@@ -79,6 +84,7 @@ type index struct {
 	slots     []slot
 	arena     []loc
 	free      int32 // arena index of the free list head, -1 if empty
+	freeLen   int   // number of nodes currently on the free list
 	liveCount int   // backs live(); named liveCount to avoid a field/method clash
 	tombs     int
 	cursor    int // sweep's rotating start slot
@@ -135,6 +141,7 @@ func (x *index) alloc(l loc) int32 {
 	if x.free >= 0 {
 		i := x.free
 		x.free = x.arena[i].next
+		x.freeLen--
 		x.arena[i] = l
 		return i
 	}
@@ -194,6 +201,7 @@ func (x *index) freeChain(head int32) {
 		next := x.arena[i].next
 		x.arena[i].next = x.free
 		x.free = i
+		x.freeLen++
 		i = next
 	}
 }
@@ -221,6 +229,53 @@ func (x *index) sweep(n int, minGen uint32) {
 		}
 	}
 	x.cursor = (x.cursor + n) % total
+	if needed := len(x.arena) - x.freeLen; len(x.arena) >= arenaCompactFloor &&
+		needed > 0 && (cap(x.arena)-needed)*4 > needed {
+		x.compact()
+	}
+}
+
+// compact rebuilds the arena to hold only live locs, dropping the free
+// list entirely. Sweep frees dead chains onto the free list for reuse, but
+// a workload's peak concurrent trace count can exceed its steady-state
+// count (e.g. two retention windows briefly overlapping): append-growth
+// sizes the arena for that peak and never shrinks it back on its own. Once
+// the free list plus append-growth headroom exceeds 25% of what's actually
+// live, compact reclaims that slack instead of carrying it forever
+// (ADR-006 r5 index budget).
+func (x *index) compact() {
+	need := 0
+	for i := range x.slots {
+		for l := x.slots[i].head - 1; l >= 0; l = x.arena[l].next {
+			need++
+		}
+	}
+	newArena := make([]loc, 0, need)
+	for i := range x.slots {
+		s := &x.slots[i]
+		if s.head <= 0 {
+			continue
+		}
+		newHead := int32(-1)
+		prev := int32(-1)
+		for l := s.head - 1; l >= 0; l = x.arena[l].next {
+			n := x.arena[l]
+			n.next = -1
+			ni := arenaIdx(len(newArena))
+			newArena = append(newArena, n)
+			if prev < 0 {
+				newHead = ni
+			} else {
+				newArena[prev].next = ni
+			}
+			prev = ni
+		}
+		s.head = newHead + 1
+		s.tail = prev + 1
+	}
+	x.arena = newArena
+	x.free = -1
+	x.freeLen = 0
 }
 
 // grow picks the smallest power-of-two table size with live*4 < 3*size and
