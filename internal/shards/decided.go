@@ -72,10 +72,10 @@ func newDecidedSet() *decidedSet {
 	}
 }
 
-// lenU64 converts a non-negative length or index to uint64, with a guard
-// for negative input (gosec G115). Returns 0 for negative input.
-// Structural invariant: every caller passes a slice length or an index
-// into one, so the input is never negative.
+// lenU64 converts a non-negative length, index, or count to uint64, with
+// a guard for negative input (gosec G115). Returns 0 for negative input.
+// Structural invariant: every caller passes a slice length, an index into
+// one, or a counter, so the input is never negative.
 func lenU64(n int) uint64 {
 	if n < 0 {
 		return 0

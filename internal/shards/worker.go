@@ -23,6 +23,12 @@ type shard struct {
 	// by the worker goroutine, like buf.
 	dec *decidedSet
 
+	// pend holds flush work the flusher could not take, deduped by trace
+	// id, and pendScratch snapshots its keys for the tick's retry pass.
+	// Both worker-owned.
+	pend        map[[16]byte]pendReq
+	pendScratch [][16]byte
+
 	// atFloorCause, when not floorClear, makes Offer shed this shard's
 	// fragments and says which rung-2 cause to charge (ADR-007 r5).
 	// Read-mostly; not part of the per-span append path.
@@ -33,6 +39,9 @@ type shard struct {
 	// decidedLen mirrors dec's population for DecidedEntries, published
 	// once per tick so readers never touch the worker-owned set.
 	decidedLen atomic.Int64
+	// pendLen mirrors pend's population for PendingFlushes, published on
+	// the same terms as decidedLen.
+	pendLen atomic.Int64
 
 	// lastDiskBytes is the shard's last DiskBytes report, for
 	// delta-updating Set.diskBytes. Worker-local.
@@ -41,6 +50,13 @@ type shard struct {
 	// closeErr is the worker's buffer Close result, readable after
 	// done is closed.
 	closeErr error
+}
+
+// pendReq is parked flush work: need-bits to run when the flush channel
+// has room again, deduped by trace id.
+type pendReq struct {
+	reason byte
+	need   Need
 }
 
 // run is the shard worker loop: appends handed-off fragments, ticks
@@ -73,9 +89,10 @@ func (sh *shard) run(s *Set) {
 // watermark, but never past the window floor (ADR-007 r5).
 func (sh *shard) tick(s *Set) {
 	now := s.opts.Now()
-	sh.buf.Expire(now)
+	s.expiredBytes.Add(sh.buf.Expire(now))
 	sh.dec.evict(now.UnixNano())
 	sh.decidedLen.Store(int64(sh.dec.len()))
+	sh.retryPending(s)
 	sh.reportDisk(s)
 
 	limit := s.opts.DiskBudget / 100 * int64(s.opts.WatermarkPct)
@@ -127,35 +144,125 @@ func (sh *shard) reportDisk(s *Set) {
 }
 
 // handle processes one queue event and recycles its buffer: fragments
-// append, keep verdicts mark the decided set exactly once (ADR-008 r5).
-// Append errors cannot reach the pipeline from here; they are counted
-// (ADR-007 r5: never a silent drop).
+// append, keep verdicts mark the decided set exactly once (ADR-008 r5),
+// and a flusher retry re-parks its need-bits. Append errors cannot reach
+// the pipeline from here; they are counted (ADR-007 r5: never a silent
+// drop).
 func (sh *shard) handle(s *Set, fb *fragBuf) {
 	switch fb.kind {
 	case evFrag:
-		if err := sh.buf.Append(fb.id, fb.data, fb.at); err != nil {
-			s.appendErrors.Add(1)
-		}
+		sh.appendFragment(s, fb)
 	case evKeep:
 		sh.keep(s, fb)
+	case evRetry:
+		s.flushRetries.Add(1)
+		sh.park(fb.id, fb.reason, fb.need)
 	}
 	sh.free <- fb
 }
 
+// appendFragment writes one fragment to disk, and for an already-decided
+// trace forwards it straight through as well (ADR-008 r3). The append
+// keeps disk the source of truth for restart replay; the forward spares
+// the flusher a whole-trace re-Collect per late span. A fragment carries
+// no verdict, so the job's Reason stays zero — the decided set does not
+// retain the deciding one.
+func (sh *shard) appendFragment(s *Set, fb *fragBuf) {
+	if err := sh.buf.Append(fb.id, fb.data, fb.at); err != nil {
+		s.appendErrors.Add(1)
+		return
+	}
+	if !sh.dec.has(fb.id) {
+		return
+	}
+	sh.sendJob(s, &FlushJob{
+		ID:    fb.id,
+		Need:  NeedFlush,
+		Frags: [][]byte{append([]byte(nil), fb.data...)},
+	})
+}
+
 // keep records one keep verdict as decided until its deadline, decide
-// time + W. A repeat delivery — local re-detection, a bus echo, or the
-// instance's own broadcast coming back — finds the id already marked and
-// counts as a duplicate, with no second decision side effect.
+// time + W, then hands the trace's buffered fragments to the flusher. A
+// repeat delivery — local re-detection, a bus echo, or the instance's own
+// broadcast coming back — finds the id already marked and counts as a
+// duplicate, with no second decision side effect.
 func (sh *shard) keep(s *Set, fb *fragBuf) {
 	if !sh.dec.mark(fb.id, fb.at.Add(s.opts.Window).UnixNano()) {
 		s.duplicateKeeps.Add(1)
 		return
 	}
+	need := NeedFlush
 	if fb.origin == OriginLocal {
 		s.keptLocal.Add(1)
+		need |= NeedPublish // only a local verdict owes a broadcast
+	} else {
+		s.keptBus.Add(1)
+	}
+	sh.collectAndSend(s, fb.id, fb.reason, need)
+}
+
+// collectAndSend builds id's job from the buffer and hands it to the
+// flusher, parking the intent on a full channel. A zero-fragment job
+// still goes out when it owes a publish — the verdict must broadcast even
+// when this batch's fragments were refused.
+func (sh *shard) collectAndSend(s *Set, id [16]byte, reason byte, need Need) {
+	j := &FlushJob{ID: id, Reason: reason, Need: need}
+	skipped, err := sh.buf.Collect(id, func(frag []byte) {
+		j.Frags = append(j.Frags, append([]byte(nil), frag...))
+	})
+	s.corruptFragments.Add(lenU64(skipped))
+	if err != nil {
+		// Read failure: the fragments stay on disk, so retry on the tick.
+		sh.park(id, reason, need)
 		return
 	}
-	s.keptBus.Add(1)
+	if len(j.Frags) == 0 && need&NeedPublish == 0 {
+		return // pending keep: later arrivals forward themselves
+	}
+	sh.sendJob(s, j)
+}
+
+// sendJob is the non-blocking flusher handoff; a full channel parks the
+// job's need-bits for the tick to retry via a fresh Collect. That retry
+// can re-forward fragments the flusher already took, which is why
+// delivery is at-least-once.
+func (sh *shard) sendJob(s *Set, j *FlushJob) {
+	select {
+	case s.opts.Flush <- j:
+	default:
+		sh.park(j.ID, j.Reason, j.Need)
+	}
+}
+
+// park merges flush work into the pending map: need-bits OR, first
+// nonzero reason wins.
+func (sh *shard) park(id [16]byte, reason byte, need Need) {
+	req := sh.pend[id]
+	if req.reason == 0 {
+		req.reason = reason
+	}
+	req.need |= need
+	sh.pend[id] = req
+}
+
+// retryPending replays every parked intent once against the buffer.
+// The keys are snapshotted first because collectAndSend re-parks on a
+// still-full channel, and Go leaves it undefined whether a range revisits
+// a key re-added during iteration — one retry per intent per tick has to
+// be exact. The scratch slice is worker-local and reused; the tick is off
+// the hot path either way.
+func (sh *shard) retryPending(s *Set) {
+	sh.pendScratch = sh.pendScratch[:0]
+	for id := range sh.pend {
+		sh.pendScratch = append(sh.pendScratch, id)
+	}
+	for _, id := range sh.pendScratch {
+		req := sh.pend[id]
+		delete(sh.pend, id)
+		sh.collectAndSend(s, id, req.reason, req.need)
+	}
+	sh.pendLen.Store(int64(len(sh.pend)))
 }
 
 // drain empties whatever the queue holds at shutdown so accepted
