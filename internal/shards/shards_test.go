@@ -160,3 +160,21 @@ func TestShutdownIsIdempotent(t *testing.T) {
 	assert.Zero(t, st.ShedQueueFull, "post-shutdown offers are ignored, not counted as shed")
 	assert.Zero(t, st.ShedFloor, "post-shutdown offers are ignored, not counted as floor shed")
 }
+
+// A fully drained shutdown must return nil even when ctx is already
+// expired: both select cases ready means Go may pick ctx.Err() and
+// report failure for a shutdown that succeeded.
+func TestShutdownCleanDrainBeatsExpiredContext(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	s := mustNew(t, testOptions(t.TempDir(), clk))
+	s.Offer(testID(1), []byte("x"), clk.Now())
+
+	require.NoError(t, s.Shutdown(context.Background()), "workers drained")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Retried shutdown after success, with a dead ctx: still nil.
+	for range 100 {
+		require.NoError(t, s.Shutdown(ctx))
+	}
+}
