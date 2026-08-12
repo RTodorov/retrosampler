@@ -42,6 +42,7 @@ type Options struct {
 	// Window is the retention window W (ADR-006).
 	Window time.Duration
 	// SegmentSize is the per-shard segment roll threshold in bytes.
+	// Must be >= 1.
 	SegmentSize int
 	// DiskBudget is the byte budget across all shards; the watermark
 	// rung acts on it (ADR-007 r5). Its watermark must exceed the
@@ -127,6 +128,9 @@ func New(opts Options) (*Set, error) {
 	switch {
 	case opts.Shards < 1:
 		return nil, errors.New("shards: Options.Shards must be >= 1")
+	case opts.SegmentSize < 1:
+		return nil, errors.New("shards: Options.SegmentSize must be >= 1 " +
+			"(buffer.Open would silently default 0, sidestepping the watermark floor check)")
 	case opts.Window <= 0:
 		return nil, errors.New("shards: Options.Window must be > 0")
 	case opts.DiskBudget <= 0:
