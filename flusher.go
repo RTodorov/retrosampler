@@ -32,6 +32,7 @@ type flusher struct {
 	done     chan struct{}
 
 	publishedKeeps atomic.Uint64
+	publishErrors  atomic.Uint64
 	flushedSpans   atomic.Uint64
 	flushErrors    atomic.Uint64
 	decodeErrors   atomic.Uint64
@@ -82,6 +83,7 @@ func (fl *flusher) process(j *shards.FlushJob) {
 	need := j.Need
 	if need&shards.NeedPublish != 0 {
 		if err := fl.b.Publish(ctx, j.ID, j.Reason); err != nil {
+			fl.publishErrors.Add(1)
 			fl.retry(j, need)
 			return
 		}

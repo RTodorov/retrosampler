@@ -48,6 +48,9 @@ func createTraces(ctx context.Context, set processor.Settings,
 	// next reaches the processor here rather than through newProcessor:
 	// the factory receives the consumer separately from the config.
 	p.next = next
+	if err := p.bindTelemetry(set.TelemetrySettings); err != nil {
+		return nil, err
+	}
 	return processorhelper.NewTraces(ctx, set, cfg, next, p.processTraces,
 		processorhelper.WithStart(p.start),
 		processorhelper.WithShutdown(p.shutdown))

@@ -20,6 +20,7 @@ import (
 
 	"github.com/rtodorov/retrosampler/internal/bus"
 	"github.com/rtodorov/retrosampler/internal/fragmenter"
+	"github.com/rtodorov/retrosampler/internal/metadata"
 	"github.com/rtodorov/retrosampler/internal/shards"
 )
 
@@ -49,6 +50,7 @@ type retroProcessor struct {
 
 	jobs      chan *shards.FlushJob
 	fl        *flusher
+	tb        *metadata.TelemetryBuilder
 	subCancel func()
 	detect    func(sp ptrace.Span) bool
 }
@@ -186,6 +188,10 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 func (p *retroProcessor) shutdown(ctx context.Context) error {
 	s := p.set.Swap(nil)
 	if s == nil {
+		// Never started, or stopped already. There is nothing to drain,
+		// but the builder was bound at construction, so a component
+		// whose Start failed still owes the meter its unregistration.
+		p.unbindTelemetry()
 		return nil
 	}
 	if p.subCancel != nil {
@@ -202,5 +208,10 @@ func (p *retroProcessor) shutdown(ctx context.Context) error {
 		p.set.Store(s)
 		return err
 	}
+	// Last, and only once the shutdown has actually succeeded: while a
+	// timed-out shutdown is still retryable the workers are alive, and
+	// that is exactly when the parked-flush and window gauges are worth
+	// reading.
+	p.unbindTelemetry()
 	return nil
 }
