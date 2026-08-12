@@ -40,12 +40,12 @@ type pooledFrag struct {
 	f   *fragmenter.Fragmenter
 	set *shards.Set
 	now time.Time
-	fn  func(id pcommon.TraceID, frag []byte)
+	fn  func(id pcommon.TraceID, frag []byte, keep bool)
 }
 
 func newPooledFrag() *pooledFrag {
 	pf := &pooledFrag{f: fragmenter.New()}
-	pf.fn = func(id pcommon.TraceID, frag []byte) { pf.set.Offer(id, frag, pf.now) }
+	pf.fn = func(id pcommon.TraceID, frag []byte, _ bool) { pf.set.Offer(id, frag, pf.now) }
 	return pf
 }
 
@@ -91,7 +91,7 @@ func (p *shadowProcessor) processTraces(_ context.Context, td ptrace.Traces) (pt
 	}
 	pf := p.fragPool.Get().(*pooledFrag)
 	pf.set, pf.now = s, p.now()
-	pf.f.Fragment(td, pf.fn)
+	pf.f.Fragment(td, nil, pf.fn)
 	pf.set = nil
 	p.fragPool.Put(pf)
 	return td, nil

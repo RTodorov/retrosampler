@@ -34,7 +34,7 @@ func BenchmarkIngest(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		f.Fragment(td, func(id pcommon.TraceID, frag []byte) {
+		f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
 			_ = buf.Append(id, frag, now)
 		})
 	}
@@ -48,7 +48,7 @@ func BenchmarkKeepFlush(b *testing.B) {
 	var ids []pcommon.TraceID
 	seen := map[pcommon.TraceID]bool{}
 	for range 200 { // fill across many segments
-		f.Fragment(td, func(id pcommon.TraceID, frag []byte) {
+		f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
 			_ = buf.Append(id, frag, now)
 			if !seen[id] {
 				seen[id] = true
@@ -68,7 +68,7 @@ func BenchmarkKeepFlush(b *testing.B) {
 func BenchmarkExpiry(b *testing.B) {
 	buf, f, td := benchBuffer(b, 1<<20)
 	for i := range 500 {
-		f.Fragment(td, func(id pcommon.TraceID, frag []byte) {
+		f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
 			_ = buf.Append(id, frag, time.Unix(int64(i), 0))
 		})
 	}
