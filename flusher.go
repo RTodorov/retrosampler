@@ -49,6 +49,10 @@ func newFlusher(jobs <-chan *shards.FlushJob, set *shards.Set,
 // start launches the flusher goroutine (one; part of the static census).
 func (fl *flusher) start() { go fl.run() }
 
+// run exits only via stopc. The jobs channel is never closed — by
+// contract the shard workers outlive nothing here, and a closed channel
+// would spin this loop on zero values — so the drain below reads it only
+// until it is momentarily empty.
 func (fl *flusher) run() {
 	defer close(fl.done)
 	for {
@@ -82,7 +86,10 @@ func (fl *flusher) process(j *shards.FlushJob) {
 			return
 		}
 		fl.publishedKeeps.Add(1)
-		need &^= shards.NeedPublish
+		// The publish bit is deliberately not cleared from need here: it
+		// is never read again. What remains owed is exactly NeedFlush,
+		// which the consume path below re-parks by name so a retried
+		// consume can never rebroadcast the keep.
 	}
 	if need&shards.NeedFlush == 0 || len(j.Frags) == 0 {
 		return
@@ -124,6 +131,11 @@ func (fl *flusher) retry(j *shards.FlushJob, need shards.Need) {
 // it exited in time. Repeat calls are safe: a shutdown that timed out is
 // retried against the same already-closed signal, and a flusher that has
 // since exited is never charged to the spent context.
+//
+// A timed-out stop leaves the goroutine LIVE and still consuming jobs —
+// it is wedged in the consumer, not abandoned — so the caller owns a
+// retry. Treating the timeout as terminal would leak the goroutine and,
+// with it, the shard set the processor's shutdown has yet to drain.
 func (fl *flusher) stop(ctx context.Context) error {
 	fl.stopOnce.Do(func() { close(fl.stopc) })
 	select {

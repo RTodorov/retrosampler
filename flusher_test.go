@@ -164,9 +164,12 @@ func TestFlusherPublishesDecodesAndConsumes(t *testing.T) {
 	// Publish-only job: the shard emits one when a keep's fragments were
 	// refused, and it must not fabricate an empty flush.
 	jobs <- &shards.FlushJob{ID: id, Reason: bus.ReasonError, Need: shards.NeedPublish}
-	require.Eventually(t, func() bool { return spy.published() == 2 },
+	// Wait on the flusher's own counter, not the spy: the spy records the
+	// publish before delegating, so it leads publishedKeeps and waiting on
+	// it would race the assertion below.
+	require.Eventually(t, func() bool { return fl.publishedKeeps.Load() == 2 },
 		5*time.Second, time.Millisecond)
-	assert.Equal(t, uint64(2), fl.publishedKeeps.Load())
+	assert.Equal(t, 2, spy.published())
 	assert.Equal(t, 3, sink.SpanCount())
 }
 
