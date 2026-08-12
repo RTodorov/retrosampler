@@ -187,6 +187,13 @@ func New(opts Options) (*Set, error) {
 // Offer routes one marshaled fragment to its shard, copying it into a
 // recycled buffer. It never blocks: with no free buffer the fragment is
 // shed and counted (ADR-007 r5 rung 3). After Shutdown it is a no-op.
+//
+// Conservation — every offered fragment is buffered or counted as shed —
+// is guaranteed only for Offers that complete before Shutdown begins. An
+// Offer racing Shutdown may enqueue onto a worker that has already
+// drained and exited, and that fragment is then dropped uncounted; in
+// shadow mode the span still passes through the pipeline. Closing the
+// race is stage-3 work, landing with retention.
 func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) {
 	if !s.intake.Load() {
 		return
@@ -211,6 +218,11 @@ func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) {
 // Shutdown stops intake, signals every worker to drain and close its
 // buffer, and waits for them, honouring ctx (ADR-007 r6). Safe to call
 // repeatedly: a timed-out Shutdown can be retried.
+//
+// It drains what the queues hold when the workers observe the stop, so
+// it conserves every Offer that completed before this call. A fragment
+// accepted concurrently with Shutdown may be dropped uncounted instead
+// (see Offer).
 func (s *Set) Shutdown(ctx context.Context) error {
 	s.intake.Store(false)
 	s.stopOnce.Do(func() {
