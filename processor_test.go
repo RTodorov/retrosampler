@@ -63,12 +63,13 @@ func TestShadowBuffersAndPassesThrough(t *testing.T) {
 	for _, d := range dirs {
 		b, err := buffer.Open(d, buffer.Options{Window: cfg.Window, SegmentSize: cfg.SegmentSize}, systemClock())
 		require.NoError(t, err)
-		require.NoError(t, b.Collect(id, func(frag []byte) {
+		_, cerr := b.Collect(id, func(frag []byte) {
 			dec, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(frag)
 			require.NoError(t, err)
 			assert.Equal(t, "op", dec.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Name())
 			visits++
-		}))
+		})
+		require.NoError(t, cerr)
 		require.NoError(t, b.Close())
 	}
 	assert.Equal(t, 1, visits, "span was buffered in exactly one shard")

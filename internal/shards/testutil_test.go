@@ -75,7 +75,8 @@ func collectAll(t *testing.T, dir string, opts Options, ids [][16]byte) uint64 {
 			opts.Now())
 		require.NoError(t, err)
 		for _, id := range ids {
-			require.NoError(t, b.Collect(id, func([]byte) { total++ }))
+			_, cerr := b.Collect(id, func([]byte) { total++ })
+			require.NoError(t, cerr)
 		}
 		require.NoError(t, b.Close())
 	}

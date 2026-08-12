@@ -60,7 +60,7 @@ func BenchmarkKeepFlush(b *testing.B) {
 	b.ResetTimer()
 	for i := range b.N {
 		id := ids[i%len(ids)]
-		_ = buf.Collect([16]byte(id), func([]byte) {})
+		_, _ = buf.Collect([16]byte(id), func([]byte) {})
 	}
 }
 

@@ -29,13 +29,15 @@ func TestReopenCollectsEverything(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = b2.Close() }()
 	n := 0
-	require.NoError(t, b2.Collect(id, func(f []byte) { require.Len(t, f, 400<<10); n++ }))
+	_, err = b2.Collect(id, func(f []byte) { require.Len(t, f, 400<<10); n++ })
+	require.NoError(t, err)
 	assert.Equal(t, 5, n)
 
 	// and the recovered active segment accepts appends
 	require.NoError(t, b2.Append(id, []byte("post"), time.Unix(11, 0)))
 	n = 0
-	require.NoError(t, b2.Collect(id, func([]byte) { n++ }))
+	_, err = b2.Collect(id, func([]byte) { n++ })
+	require.NoError(t, err)
 	assert.Equal(t, 6, n)
 }
 
@@ -59,7 +61,8 @@ func TestTornTailTruncatesAtEveryByteBoundary(t *testing.T) {
 		b2, err := Open(dir, Options{Window: time.Minute}, time.Unix(10, 0))
 		require.NoError(t, err, "cut=%d", cut)
 		n := 0
-		require.NoError(t, b2.Collect(id, func([]byte) { n++ }))
+		_, err = b2.Collect(id, func([]byte) { n++ })
+		require.NoError(t, err, "cut=%d", cut)
 		assert.Equal(t, cut/recLen, n, "cut=%d: whole valid records survive, partial tail dropped", cut)
 		require.NoError(t, b2.Close())
 	}
@@ -110,6 +113,8 @@ func TestCollectSkipsCorruptFragmentInFinalizedSegment(t *testing.T) {
 	defer func() { _ = b2.Close() }()
 
 	n := 0
-	require.NoError(t, b2.Collect(id, func([]byte) { n++ }))
+	skipped, err := b2.Collect(id, func([]byte) { n++ })
+	require.NoError(t, err)
 	assert.Equal(t, 1, n, "gen1's corrupt fragment must be skipped at read time; gen2's intact fragment must survive")
+	assert.Equal(t, 1, skipped, "the skipped fragment is counted for the caller")
 }
