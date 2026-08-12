@@ -1,6 +1,6 @@
 {
-  "phase": "stage-1-buffer-core",
-  "updated": "2026-08-11",
+  "phase": "stage-2-shard-overload",
+  "updated": "2026-08-12",
   "roadmap": [
     "1 buffer core: fragmenter + segment store + index (spec: docs/superpowers/specs/2026-08-11-buffer-core-design.md)",
     "2 shard layer + overload ladder (ADR-007)",
@@ -8,7 +8,7 @@
     "4 keep detection: baggage T0/elapsed_ms, zero-alloc built-ins, OTTL rules (ADR-008)",
     "5 config surface: every field wired + reflection test (ADR-005)",
     "6 integration hardening: real bus in compose, cross-instance asserts, fragment-splitting loadgen, testbed, W validation",
-    "bridge: stages 1-2 shadow mode (buffer AND pass through) so compose conservation asserts hold until stage 3"
+    "bridge: shadow mode (buffer AND pass through) held through stages 1-2 (both done); it ends in stage 3 when retention replaces pass-through, and the compose conservation asserts change with it"
   ],
   "done": [
     "ADR-001 harness philosophy",
@@ -31,18 +31,19 @@
     "2026-08-11 CI verified green on GitHub (run 31483727725): all 6 jobs pass; fixes en route: golangci-lint pinned via official installer (go-install pinning conflicts with lefthook deps), go 1.25.11 for 3 stdlib CVEs flagged by vuln gate",
     "2026-08-11 compose e2e gate: 2-instance topology (retrosampler-1/2, distroless image from host-cross-compiled ocb binary), pinned telemetrygen paced load, exact span-conservation assertions (10000/instance), make e2e-compose + CI job; failure path proven",
     "2026-08-11 stage-1 buffer core BUILT (b692c9d..9846bc9, 26 commits, subagent-driven, per-task + final reviews): internal/fragmenter (hand-rolled OTLP encoder, zero-alloc grouping), internal/buffer (CRC records, footer/trailer segments, fsync-on-roll, compact index w/ arena+compaction, whole-segment expiry, torn-tail recovery), shadow processor wiring (coarse mutex + 1s expiry ticker, idempotent shutdown, injected clock); gates GREEN: 004 r2 zero-alloc (stage-1 scope), 006 r5 budget 149.4 B/live-trace, 006 r6 torn-tail every-byte sweep; benchmarks Ingest ~350ns/span 0 allocs, KeepFlush ~116us, Expiry ~1us; baseline-m-arm64 committed, bench-gate live; final-review fixes: full-id fibonacci hash, 1GiB segment_size bound, 64MiB fragment cap, best-effort close; acceptance fully green: lint/race/cover 87-83.8-97.8/generate/bench-gate/e2e local + CI run 31522641393 all 8 jobs incl. compose-e2e conservation",
-    "2026-08-11 banned-token gate closed the subagent harness gap: writer-agnostic enforcement at pre-commit (lefthook banned-tokens job, rejection proven live) + CI integrity sweep (scripts/banned_tokens.sh); session PreToolUse guards demoted to advisory layer"
+    "2026-08-11 banned-token gate closed the subagent harness gap: writer-agnostic enforcement at pre-commit (lefthook banned-tokens job, rejection proven live) + CI integrity sweep (scripts/banned_tokens.sh); session PreToolUse guards demoted to advisory layer",
+    "2026-08-12 stage-2 shard layer + overload ladder BUILT (ba2cb81..93c4acb + this commit, subagent-driven, per-task reviews + fix rounds): internal/shards (fibhash routing, N=min(GOMAXPROCS,config) single-writer workers, 64-deep free-ring/work-queue handoff, per-shard 1s tick); overload ladder = global disk watermark (delta-reported atomic) -> per-shard oldest-segment early expiry -> window floor -> shed, plus queue-full shed, every shed and append-error counted in atomic Stats; coarse mutex deleted from processor.go (atomic.Pointer set + pooled fragmenters with reusable closure); config surface shards/disk_budget/watermark_pct/window_floor + validation, disk_budget now REQUIRED with storage_dir (breaking config change, e2e fixtures updated); buffer extensions DiskBytes accounting, OldestFinalizedTMax, ExpireOldest, removeSegment remove-before-teardown fix; stage-1 carry-overs closed (chain-ref helpers, fragBufLen ok-returning guard convention, deleteExpired ordering); zero-alloc gates extended over route+enqueue and processTraces (the brief's original gates were found hollow and were rebuilt mutation-proven; sync.Pool race-detector drop priced out with a bounded miss budget); BenchmarkOffer ~42-60ns/op 0 allocs (informational, ungated); bench_gate.sh repaired (4 faults: p-value column, sticky metric, 0->N allocs invisible as '?', one-sided vacuity; + per-benchmark pairing floor of 3; 9-case selftest wired as harness_integrity C8; CI integrity job gained Go toolchain); baseline re-recorded on M1 Max as the m-arm64 reference (was M1, old numbers in git history); lefthook hooks found un-installed in this checkout, re-armed via .tools/lefthook install; local acceptance fully green: fmt/lint/race/cover 96.1-84.3-97.8-91.8/generate-no-diff/build/e2e/e2e-compose 10000+10000 spans conserved"
   ],
   "next": [
-    "stage 2: shard layer + overload ladder (ADR-007) \u2014 delete the temporary coarse mutex in processor.go, buffer instances become shard-owned; spec via brainstorming per roadmap",
-    "stage 2 carry-overs: guard-helper convention consolidation (ok-returning), index +1/-1 offset helper pair, deleteExpired os.Remove-error path keeps meta entry, budget gate has only 0.4% headroom (expect it red on index changes)",
+    "stage 3: decision plane + flush (decided set, pending keeps, bus iface + fake, keep-on-error built-in; e2e keep loop) per roadmap/ADR-008; flip floor/queue-full sheds into retryable ConsumeTraces errors when pass-through dies; wire shed/append-error counters + effective_window_seconds into metadata.yaml telemetry export (alarm-ready; also splits ShedFloor's two causes: floor-protected vs nothing-reclaimable)",
+    "stage-3 carry-overs from reviews: effWindow negative clamp (future-stamped fragments; echoes ADR-008 skew clamp); Offer-vs-Shutdown race drops one fragment uncounted (doc or close when retention flips); concurrent ingest-vs-shutdown processor test; watermark_pct==100 boundary row; roll() f.Stat error path leaks the handle; decide whether BenchmarkOffer joins the gated set after reshaping it around the non-shed path (needs ADR-004 amendment; also decide strict pairing count n!=gated)",
     "grow compose scenario: bus container + cross-instance keep assertions when bus client lands; custom fragment-splitting loadgen designed with first keep condition"
   ],
   "gates_green": [
     {
-      "gate": "hot-path allocs/span = 0 via testing.AllocsPerRun (stage-1 scope: fragment+append; shard routing joins in stage 2)",
+      "gate": "hot-path allocs/span = 0 via testing.AllocsPerRun (fragment+append+route+enqueue+processTraces)",
       "adr": "004 r2",
-      "test": "internal/buffer TestHotPathZeroAllocs"
+      "test": "internal/buffer TestHotPathZeroAllocs, internal/shards TestOfferZeroAllocs, root TestProcessTracesZeroAllocs"
     },
     {
       "gate": "index <=150 B/live-trace budget (149.4 measured at pinned workload)",
@@ -53,6 +54,21 @@
       "gate": "torn-tail CRC truncation / restart index rebuild (every-byte boundary sweep)",
       "adr": "006 r6",
       "test": "internal/buffer recovery_test.go"
+    },
+    {
+      "gate": "overload ladder: watermark early-expiry, floor shed, queue-full shed, every shed counted",
+      "adr": "007 r5",
+      "test": "internal/shards/ladder_test.go TestWatermarkEarlyExpiryShrinksEffectiveWindow, TestFloorProtectedDataMakesOfferShed, TestQueueFullShedsAndCounts"
+    },
+    {
+      "gate": "Shutdown(ctx) deadline + drain/flush",
+      "adr": "001 r12, 007 r6",
+      "test": "internal/shards TestShutdownHonoursDeadlineWhileWedged + clean-drain assertions in TestQueueFullShedsAndCounts"
+    },
+    {
+      "gate": "goleak static goroutine census",
+      "adr": "007 r7",
+      "test": "internal/shards/package_test.go TestMain (+ root generated_package_test.go TestMain)"
     }
   ],
   "pending_gates": [
@@ -61,24 +77,8 @@
       "adr": "004 r2, 008 r2"
     },
     {
-      "gate": "Shutdown(ctx) deadline + flush test",
-      "adr": "001 r12, 007 r6"
-    },
-    {
-      "gate": "goleak static goroutine census (TestMain landed at scaffold)",
-      "adr": "007 r7"
-    },
-    {
-      "gate": "torn-tail CRC truncation / restart index rebuild test",
-      "adr": "006 r6"
-    },
-    {
       "gate": "decided-set idempotency: duplicate keeps, no duplicate flush/publish",
       "adr": "008 r5"
-    },
-    {
-      "gate": "overload ladder: watermark early-expiry, floor retryable error, queue-full retryable error, every shed counted",
-      "adr": "007 r5"
     },
     {
       "gate": "every-config-field-exercised reflection test",
