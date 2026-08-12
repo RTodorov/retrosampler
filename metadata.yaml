@@ -8,4 +8,12 @@ status:
     active: [rtodorov]
 
 tests:
+  # The generated lifecycle test Starts the component against these
+  # values, and the default config no longer stands alone: storage_dir
+  # and disk_budget are required, and shards is pinned because it
+  # otherwise defaults to GOMAXPROCS, whose shards x segment_size floor
+  # would break through this budget's watermark on a many-core runner.
   config:
+    storage_dir: /tmp/retrosampler-lifecycle
+    disk_budget: 1073741824
+    shards: 4

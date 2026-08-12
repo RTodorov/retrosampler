@@ -10,8 +10,9 @@ import (
 
 // Config defines configuration for the retrosampler processor.
 type Config struct {
-	// StorageDir is the buffer segment directory. Empty disables
-	// buffering (passthrough only) — stage-1 shadow mode is opt-in.
+	// StorageDir is the buffer segment directory. Required: the
+	// processor emits only what it has buffered, so there is no
+	// meaningful unbuffered mode.
 	StorageDir string `mapstructure:"storage_dir"`
 	// Window is the retention window W (ADR-006).
 	Window time.Duration `mapstructure:"window"`
@@ -22,7 +23,7 @@ type Config struct {
 	Shards int `mapstructure:"shards"`
 	// DiskBudget is the total buffer disk budget in bytes across all
 	// shards (ADR-006); the overload ladder acts on it (ADR-007 r5).
-	// Required whenever storage_dir is set.
+	// Required.
 	//
 	// It is a target, soft in two directions. Above: only finalized
 	// segments are reclaimable, so the shards x segment_size bytes held
@@ -37,10 +38,20 @@ type Config struct {
 	// WindowFloor is the minimum effective window early expiry may
 	// leave; at the floor, ingest sheds instead (ADR-007 r5).
 	WindowFloor time.Duration `mapstructure:"window_floor"`
+	// KeepOnError keeps any trace containing a span with error status —
+	// the keep-on-error built-in (ADR-009), evaluated per span at
+	// ingest, guaranteed alloc-free. Default true.
+	KeepOnError bool `mapstructure:"keep_on_error"`
 }
 
 // Validate checks that the configuration is usable.
 func (cfg *Config) Validate() error {
+	if cfg.StorageDir == "" {
+		return errors.New("storage_dir is required (a retroactive sampler that cannot buffer cannot sample)")
+	}
+	if cfg.DiskBudget <= 0 {
+		return errors.New("disk_budget is required")
+	}
 	if cfg.Window <= 0 {
 		return errors.New("window must be positive")
 	}
@@ -61,9 +72,6 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.WindowFloor <= 0 || cfg.WindowFloor >= cfg.Window {
 		return errors.New("window_floor must be positive and below window")
-	}
-	if cfg.StorageDir != "" && cfg.DiskBudget <= 0 {
-		return errors.New("disk_budget is required when storage_dir is set")
 	}
 	return nil
 }

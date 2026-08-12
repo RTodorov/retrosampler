@@ -11,8 +11,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor/processorhelper"
 	"go.uber.org/zap"
+
+	"github.com/rtodorov/retrosampler/internal/bus"
 )
 
 // allocBatchTraces is the distinct-trace count in allocBatch, and so the
@@ -76,7 +80,8 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	// segments the budget scales with the machine rather than pinning the
 	// shard count this gate exercises. Nothing preallocates it.
 	cfg.DiskBudget = 2 * int64(runtime.GOMAXPROCS(0)) * int64(cfg.SegmentSize)
-	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
+	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p.next = consumertest.NewNop()
 	// sync.Pool drops one Put in four on purpose under the race detector
 	// (go1.25 sync/pool.go Put), and every suite here runs with -race, so
 	// a pool round-trip is not allocation-free in that mode: the forced
@@ -91,7 +96,7 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	// drives processTraces sequentially; the counter is unsynchronised for
 	// the same reason.
 	misses := 0
-	shared := newPooledFrag()
+	shared := p.newPooledFrag()
 	p.fragPool.New = func() any { misses++; return shared }
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	defer func() { require.NoError(t, p.shutdown(context.Background())) }()
@@ -100,7 +105,8 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	ctx := context.Background()
 	for range 200 {
 		_, err := p.processTraces(ctx, td)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData,
+			"the warm-up must ride the accepted path, not the overload refusal")
 		runtime.Gosched()
 	}
 

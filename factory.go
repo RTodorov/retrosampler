@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/processorhelper"
 
+	"github.com/rtodorov/retrosampler/internal/bus"
 	"github.com/rtodorov/retrosampler/internal/metadata"
 )
 
@@ -34,13 +35,19 @@ func createDefaultConfig() component.Config {
 		SegmentSize:  32 << 20,
 		WatermarkPct: 80,
 		WindowFloor:  time.Minute,
+		KeepOnError:  true,
 	}
 }
 
 func createTraces(ctx context.Context, set processor.Settings,
 	cfg component.Config, next consumer.Traces,
 ) (processor.Traces, error) {
-	p := newShadowProcessor(cfg.(*Config), set.Logger, systemClock)
+	// The Loopback is the single-instance default: local keeps drive the
+	// whole decide->flush loop with no infrastructure (ADR-008 r6).
+	p := newProcessor(cfg.(*Config), set.Logger, systemClock, bus.NewLoopback())
+	// next reaches the processor here rather than through newProcessor:
+	// the factory receives the consumer separately from the config.
+	p.next = next
 	return processorhelper.NewTraces(ctx, set, cfg, next, p.processTraces,
 		processorhelper.WithStart(p.start),
 		processorhelper.WithShutdown(p.shutdown))
