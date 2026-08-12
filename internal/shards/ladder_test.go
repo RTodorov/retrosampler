@@ -4,6 +4,7 @@
 package shards
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -157,4 +158,27 @@ func TestFloorProtectedDataMakesOfferShed(t *testing.T) {
 		"over watermark with floor-protected candidates: ingest sheds, counted")
 	assert.Zero(t, s.Stats().EarlyExpiredSegments,
 		"floor-protected segments are never sacrificed")
+}
+
+// A future-stamped fragment (producer clock ahead of ours) makes
+// now-tMax negative; EffectiveWindow must clamp to zero, not go
+// negative (echoes the ADR-008 r7 skew clamp).
+func TestEffectiveWindowClampsFutureStampedData(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.Shards = 1
+	opts.Tick = 10 * time.Millisecond
+	opts.SegmentSize = 1 << 10 // tiny: first append rolls a finalized segment
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	future := clk.Now().Add(time.Hour)
+	s.Offer(testID(1), bytes.Repeat([]byte{1}, 2<<10), future)
+	s.Offer(testID(2), []byte("x"), future) // forces the roll past SegmentSize
+
+	require.Eventually(t, func() bool {
+		w := s.EffectiveWindow()
+		return w < opts.Window && w >= 0
+	}, 5*time.Second, time.Millisecond, "tick must observe the finalized future segment")
+	assert.GreaterOrEqual(t, s.EffectiveWindow(), time.Duration(0))
 }
