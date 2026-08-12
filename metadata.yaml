@@ -17,3 +17,207 @@ tests:
     storage_dir: /tmp/retrosampler-lifecycle
     disk_budget: 1073741824
     shards: 4
+
+# Every instrument is async: the callbacks read counters the hot path
+# has already incremented atomically, so ingest never touches an OTel
+# API (ADR-004 r2). prefix pins the emitted names to the dotted
+# otelcol.* form; without it mdatagen would splice these dotted ids
+# onto its underscore default as otelcol_processor.retrosampler.*.
+# mdatagen requires the keys below in byte order, which is why they
+# read alphabetically rather than by ladder rung.
+telemetry:
+  metrics:
+    processor.retrosampler.append.errors:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Fragment appends that failed against the shard buffer.
+      unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.corrupt.fragments:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Fragment skip events - corrupt length or CRC mismatch at Collect, plus decode failures at flush. Events, not distinct fragments - a retried tick re-counts the same bad bytes on disk.
+      unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.decided.entries:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Live decided-set entries across shards.
+      unit: "{traces}"
+      gauge:
+        value_type: int
+        async: true
+
+    processor.retrosampler.duplicate.keeps:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Keep verdicts suppressed by the decided set (redelivery, multiple detectors, self-delivery).
+      unit: "{keeps}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.early_expired.segments:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Segments sacrificed early by the disk watermark rung.
+      unit: "{segments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.effective_window.seconds:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Smallest effective retention window across shards.
+      unit: s
+      gauge:
+        value_type: int
+        async: true
+
+    processor.retrosampler.expired.bytes:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Bytes reclaimed by normal window expiry.
+      unit: By
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.flush.errors:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Flush attempts the next consumer rejected.
+      unit: "{flushes}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.flush.retries:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Flush intents re-parked for retry after a downstream failure.
+      unit: "{flushes}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.flushed.spans:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Kept spans emitted to the next consumer.
+      unit: "{spans}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.kept.bus:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Traces decided kept by a bus broadcast.
+      unit: "{traces}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.kept.local:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Traces decided kept by local detection. Includes keeps whose fragments all shed, so this can lead flushed spans under sustained shed.
+      unit: "{traces}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.pending.flushes:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Flush intents parked awaiting retry.
+      unit: "{flushes}"
+      gauge:
+        value_type: int
+        async: true
+
+    processor.retrosampler.publish.errors:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Keep verdicts the bus refused. Each one re-parks the publish need-bit for retry.
+      unit: "{publishes}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.published.keeps:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Keep verdicts published to the bus.
+      unit: "{keeps}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.shed.floor_protected:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Fragments refused at the window floor while floor-protected data blocks early expiry.
+      unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.shed.nothing_reclaimable:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Fragments refused at the window floor with no finalized segment left to sacrifice.
+      unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.shed.queue_full:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Ingest events refused because the shard queue had no free buffer. Counts refused keep verdicts as well as refused fragments.
+      unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
