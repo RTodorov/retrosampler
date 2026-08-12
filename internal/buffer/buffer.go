@@ -319,8 +319,11 @@ func (b *Buffer) roll() error {
 }
 
 // Collect visits every live fragment of id in append order. frag is only
-// valid during the call. Unknown id: no visits, nil error.
-func (b *Buffer) Collect(id [16]byte, visit func(frag []byte)) error {
+// valid during the call. Unknown id: no visits, nil error. skipped counts
+// fragments dropped as corrupt — an impossible index length, or a payload
+// whose CRC does not match its record header — so a caller forwarding the
+// trace can report the loss rather than emit a silently incomplete one.
+func (b *Buffer) Collect(id [16]byte, visit func(frag []byte)) (skipped int, err error) {
 	flushed := false
 	for i := b.idx.head(id); i >= 0; {
 		l := b.idx.at(i)
@@ -331,11 +334,12 @@ func (b *Buffer) Collect(id [16]byte, visit func(frag []byte)) error {
 
 		r, err := b.readerFor(l.gen, &flushed)
 		if err != nil {
-			return err
+			return skipped, err
 		}
 
 		need, lenOK := fragBufLen(l.length)
 		if !lenOK {
+			skipped++
 			i = l.next
 			continue
 		}
@@ -344,16 +348,18 @@ func (b *Buffer) Collect(id [16]byte, visit func(frag []byte)) error {
 		}
 		buf := b.readBuf[:need]
 		if _, err := r.ReadAt(buf, int64(l.off)); err != nil {
-			return fmt.Errorf("buffer: read segment %d offset %d: %w", l.gen, l.off, err)
+			return skipped, fmt.Errorf("buffer: read segment %d offset %d: %w", l.gen, l.off, err)
 		}
 		wantCRC := binary.LittleEndian.Uint32(buf[20:24])
 		payload := buf[recHeaderLen:need]
 		if crc32.Checksum(payload, castagnoli) == wantCRC {
 			visit(payload)
+		} else {
+			skipped++
 		}
 		i = l.next
 	}
-	return nil
+	return skipped, nil
 }
 
 // readerFor returns the read handle for generation gen: the active
@@ -391,32 +397,38 @@ func (b *Buffer) readerFor(gen uint32, flushed *bool) (*os.File, error) {
 //     now-Window), roll it so rule 1 deletes it on the next call;
 //  3. sweep up to SweepChunk index slots to reclaim dead traces' locs now
 //     that minGen has advanced.
-func (b *Buffer) Expire(now time.Time) {
+//
+// freed is the disk bytes rule 1 reclaimed on this call. A segment rolled
+// by rule 2 contributes on the following call, when rule 1 deletes it.
+func (b *Buffer) Expire(now time.Time) (freed int64) {
 	cutoff := now.Add(-b.opts.Window).UnixNano()
-	b.deleteExpired(cutoff)
+	freed = b.deleteExpired(cutoff)
 
 	if b.w.size > 0 && b.w.tMax < cutoff {
-		// Expire has no error return (brief's signature); a roll failure here
-		// leaves the active segment as-is and is retried on the next call.
+		// Expire reports freed bytes, not errors; a roll failure here leaves
+		// the active segment as-is and is retried on the next call.
 		_ = b.roll()
 	}
 
 	b.idx.sweep(b.opts.SweepChunk, b.minGen)
+	return freed
 }
 
 // deleteExpired removes every finalized segment whose tMax < cutoff, in
-// ascending gen order, advancing minGen past each deleted segment. Gens are
-// contiguous by construction (roll always allocates gen+1), so finding and
-// removing the minimum repeatedly correctly walks the expired prefix.
-func (b *Buffer) deleteExpired(cutoff int64) {
+// ascending gen order, advancing minGen past each deleted segment, and
+// returns the disk bytes reclaimed. Gens are contiguous by construction
+// (roll always allocates gen+1), so finding and removing the minimum
+// repeatedly correctly walks the expired prefix.
+func (b *Buffer) deleteExpired(cutoff int64) (freed int64) {
 	for {
 		gen, meta, ok := b.oldestFinalized()
 		if !ok || meta.tMax >= cutoff {
-			return
+			return freed
 		}
 		if !b.removeSegment(gen) {
-			return
+			return freed
 		}
+		freed += meta.size
 	}
 }
 

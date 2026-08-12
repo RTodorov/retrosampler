@@ -106,9 +106,10 @@ func TestConservationProperty(t *testing.T) {
 			}
 		}
 		var got [][]byte
-		require.NoError(t, b.Collect(id, func(p []byte) {
+		_, err := b.Collect(id, func(p []byte) {
 			got = append(got, append([]byte(nil), p...))
-		}))
+		})
+		require.NoError(t, err)
 		require.Len(t, got, len(expected), "trace %x", id[:8])
 		for i := range expected {
 			assert.True(t, bytes.Equal(expected[i], got[i]), "trace %x frag %d", id[:8], i)

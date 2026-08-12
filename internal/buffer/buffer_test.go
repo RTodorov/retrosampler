@@ -26,8 +26,10 @@ func TestAppendCollectRoundTrip(t *testing.T) {
 	require.NoError(t, b.Append(id, []byte("frag-2"), time.Unix(2, 0)))
 
 	var got []string
-	require.NoError(t, b.Collect(id, func(f []byte) { got = append(got, string(f)) }))
+	skipped, err := b.Collect(id, func(f []byte) { got = append(got, string(f)) })
+	require.NoError(t, err)
 	assert.Equal(t, []string{"frag-1", "frag-2"}, got, "active-segment reads must flush the write buffer")
+	assert.Zero(t, skipped, "an intact trace reports no corruption")
 }
 
 func TestAppendRejectsOversizedFragment(t *testing.T) {
@@ -43,7 +45,8 @@ func TestAppendRejectsOversizedFragment(t *testing.T) {
 	id := [16]byte{2}
 	require.NoError(t, b.Append(id, []byte("ok"), time.Unix(1, 0)))
 	var got []string
-	require.NoError(t, b.Collect(id, func(f []byte) { got = append(got, string(f)) }))
+	_, err = b.Collect(id, func(f []byte) { got = append(got, string(f)) })
+	require.NoError(t, err)
 	assert.Equal(t, []string{"ok"}, got)
 }
 
@@ -96,7 +99,8 @@ func TestCollectUnknownTrace(t *testing.T) {
 	b, err := Open(t.TempDir(), Options{Window: time.Minute}, time.Unix(0, 0))
 	require.NoError(t, err)
 	defer func() { _ = b.Close() }()
-	require.NoError(t, b.Collect([16]byte{9}, func([]byte) { t.Fatal("no visits expected") }))
+	_, err = b.Collect([16]byte{9}, func([]byte) { t.Fatal("no visits expected") })
+	require.NoError(t, err)
 }
 
 func TestAppendRollsSegments(t *testing.T) {
@@ -110,7 +114,8 @@ func TestAppendRollsSegments(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, b.ActiveGen(), uint32(2))
 	n := 0
-	require.NoError(t, b.Collect(id, func(f []byte) { require.Len(t, f, 64<<10); n++ }))
+	_, err = b.Collect(id, func(f []byte) { require.Len(t, f, 64<<10); n++ })
+	require.NoError(t, err)
 	assert.Equal(t, 40, n, "fragments must survive rolls, across finalized and active segments")
 }
 
@@ -130,7 +135,9 @@ func TestCollectVerifiesCRC(t *testing.T) {
 	b2, err := Open(dir, Options{Window: time.Minute}, time.Unix(2, 0))
 	require.NoError(t, err)
 	defer func() { _ = b2.Close() }()
-	require.NoError(t, b2.Collect(id, func([]byte) { t.Fatal("corrupt fragment must not be visited") }))
+	skipped, err := b2.Collect(id, func([]byte) { t.Fatal("corrupt fragment must not be visited") })
+	require.NoError(t, err)
+	assert.Zero(t, skipped, "recovery truncated the corrupt tail, so nothing reaches Collect's CRC check")
 }
 
 func TestDiskBytesTracksSegmentLifecycle(t *testing.T) {
@@ -173,6 +180,24 @@ func TestCollectSkipsCorruptLengthLoc(t *testing.T) {
 	b.idx.put(id, loc{gen: b.w.gen, off: 0, length: math.MaxUint32})
 
 	visits := 0
-	require.NoError(t, b.Collect(id, func([]byte) { visits++ }))
+	skipped, err := b.Collect(id, func([]byte) { visits++ })
+	require.NoError(t, err)
 	assert.Equal(t, 1, visits, "the real fragment is visited, the corrupt loc skipped")
+	assert.Equal(t, 1, skipped, "corrupt-length loc counted, not silent")
+}
+
+func TestExpireReportsFreedBytes(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir, Options{Window: time.Minute, SegmentSize: 1 << 20}, time.Unix(0, 0))
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	require.NoError(t, b.Append([16]byte{1}, bytes.Repeat([]byte{0xAA}, 1<<20), time.Unix(1, 0)))
+	require.NoError(t, b.Append([16]byte{2}, []byte("young"), time.Unix(600, 0)))
+	before := b.DiskBytes()
+	freed := b.Expire(time.Unix(600, 0).Add(time.Minute))
+	assert.Positive(t, freed, "the rolled first segment expired")
+	assert.Equal(t, before-b.DiskBytes(), freed, "freed matches the disk delta")
+
+	assert.Zero(t, b.Expire(time.Unix(600, 0).Add(time.Minute)), "second call frees nothing")
 }

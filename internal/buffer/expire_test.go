@@ -32,9 +32,11 @@ func TestExpireDeletesWholeSegments(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.seg"))
 	assert.Len(t, files, 1, "expired segment files removed, active remains")
 
-	require.NoError(t, b.Collect(old, func([]byte) { t.Fatal("all of old's locs expired") }))
+	_, err = b.Collect(old, func([]byte) { t.Fatal("all of old's locs expired") })
+	require.NoError(t, err)
 	got := 0
-	require.NoError(t, b.Collect(fresh, func([]byte) { got++ }))
+	_, err = b.Collect(fresh, func([]byte) { got++ })
+	require.NoError(t, err)
 	assert.Equal(t, 1, got, "unexpired fragments still collectable")
 }
 
@@ -45,7 +47,8 @@ func TestExpireRollsStaleActiveSegment(t *testing.T) {
 	require.NoError(t, b.Append([16]byte{1}, []byte("old"), time.Unix(1, 0)))
 	b.Expire(time.Unix(30, 0)) // rolls stale active
 	b.Expire(time.Unix(30, 0)) // deletes it
-	require.NoError(t, b.Collect([16]byte{1}, func([]byte) { t.Fatal("expired") }))
+	_, err = b.Collect([16]byte{1}, func([]byte) { t.Fatal("expired") })
+	require.NoError(t, err)
 	assert.Greater(t, b.MinLiveGen(), uint32(1))
 }
 
@@ -117,7 +120,8 @@ func TestExpireRemoveFailureKeepsSegmentReadable(t *testing.T) {
 	b.Expire(time.Unix(71, 0))
 	assert.Equal(t, uint32(1), b.MinLiveGen(), "failed remove: minGen must not advance")
 	visits := 0
-	require.NoError(t, b.Collect(id1, func([]byte) { visits++ }))
+	_, err = b.Collect(id1, func([]byte) { visits++ })
+	require.NoError(t, err)
 	assert.Equal(t, 1, visits, "failed remove: fragment stays collectable")
 
 	// Clear the sabotage; the retry reclaims it.
