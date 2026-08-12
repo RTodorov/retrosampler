@@ -70,8 +70,12 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 
 	cfg := createDefaultConfig().(*Config)
 	cfg.StorageDir = t.TempDir()
-	cfg.DiskBudget = 1 << 30
 	cfg.SegmentSize = 1 << 30 // no roll during measurement
+	// The set runs GOMAXPROCS shards, and shards.New refuses a watermark
+	// under the unreclaimable Shards x SegmentSize floor, so with 1 GiB
+	// segments the budget scales with the machine rather than pinning the
+	// shard count this gate exercises. Nothing preallocates it.
+	cfg.DiskBudget = 2 * int64(runtime.GOMAXPROCS(0)) * int64(cfg.SegmentSize)
 	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
 	// sync.Pool drops one Put in four on purpose under the race detector
 	// (go1.25 sync/pool.go Put), and every suite here runs with -race, so

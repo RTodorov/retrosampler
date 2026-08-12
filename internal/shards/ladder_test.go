@@ -135,7 +135,9 @@ func TestFloorProtectedDataMakesOfferShed(t *testing.T) {
 	opts.Shards = 1
 	opts.Window = time.Hour
 	opts.SegmentSize = 4096
-	opts.DiskBudget = 8 << 10 // 8 KiB budget: immediately over watermark
+	// 16 KiB budget: the 8 KiB watermark clears the 4 KiB active-segment
+	// floor, and the ~16 KiB offered below goes straight over it.
+	opts.DiskBudget = 16 << 10
 	opts.WatermarkPct = 50
 	opts.WindowFloor = 45 * time.Minute // 30-minute-old data is floor-protected
 	opts.Tick = 10 * time.Millisecond

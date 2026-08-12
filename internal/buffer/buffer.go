@@ -292,6 +292,11 @@ func (b *Buffer) roll() error {
 	}
 	fi, err := f.Stat()
 	if err != nil {
+		// This return leaves the buffer half-rolled — segment finalized,
+		// no reader registered — which Collect surfaces as "no reader for
+		// segment %d" on a later read. Restructuring that is stage-3
+		// work; leaking the handle here is not (mirrors recover()).
+		_ = f.Close()
 		return fmt.Errorf("buffer: stat finalized segment %d: %w", gen, err)
 	}
 	b.readers[gen] = f
