@@ -10,15 +10,20 @@ import (
 	"time"
 )
 
-// BenchmarkOffer measures the stage-2 routing hot path: hash, free-ring
+// BenchmarkOffer exercises Offer under full-speed load: hash, free-ring
 // handoff, and fragment copy, with the shard workers appending
-// concurrently. ADR-004 r5 gates time/op and allocs/op regressions.
+// concurrently. It is informational and NOT part of the ADR-004 r5 gated
+// set — nothing here fails a regression, by ruling.
 //
 // A producer that never blocks outruns its workers eventually, so sheds
 // are part of what full-speed load measures. They are reported per op
 // rather than suppressed: the warm-up's sheds are excluded so the number
-// describes the measured window, where a sheds/op near 1 would mean the
-// loop rode the queue-full early return instead of the route.
+// describes the measured window. The committed baseline rows sit at
+// 0.87-0.97 sheds/op, so by that criterion those numbers describe the
+// saturated/shed regime — the queue-full early return — and not the
+// routing hot path. Reshaping this benchmark around the non-shed path
+// (and deciding whether it then joins the gated set) is a recorded
+// stage-3 item; TestOfferZeroAllocs is what gates the routing path today.
 func BenchmarkOffer(b *testing.B) {
 	const nIDs = 1024
 
