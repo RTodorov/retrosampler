@@ -236,6 +236,11 @@ func (s *Set) Shutdown(ctx context.Context) error {
 	})
 	for _, sh := range s.shards {
 		select {
+		case <-sh.done: // already drained: never charge this to ctx
+			continue
+		default:
+		}
+		select {
 		case <-sh.done:
 		case <-ctx.Done():
 			return ctx.Err()
