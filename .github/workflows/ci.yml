@@ -74,6 +74,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make install-tools
       - run: scripts/harness_integrity.sh
   e2e-compose:
     runs-on: ubuntu-latest
