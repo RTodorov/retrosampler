@@ -87,6 +87,24 @@ func encodeFrag(t *testing.T, id pcommon.TraceID, name string) []byte {
 	return out
 }
 
+// spanNames flattens every span name the sink has been handed.
+func spanNames(sink *consumertest.TracesSink) []string {
+	var names []string
+	for _, td := range sink.AllTraces() {
+		rss := td.ResourceSpans()
+		for i := 0; i < rss.Len(); i++ {
+			sss := rss.At(i).ScopeSpans()
+			for j := 0; j < sss.Len(); j++ {
+				sps := sss.At(j).Spans()
+				for k := 0; k < sps.Len(); k++ {
+					names = append(names, sps.At(k).Name())
+				}
+			}
+		}
+	}
+	return names
+}
+
 // busSpy records publishes, and refuses them while failing is set.
 type busSpy struct {
 	bus.Bus
@@ -131,6 +149,8 @@ func TestFlusherPublishesDecodesAndConsumes(t *testing.T) {
 	assert.Equal(t, 1, spy.published())
 	assert.Equal(t, uint64(1), fl.publishedKeeps.Load())
 	assert.Equal(t, uint64(2), fl.flushedSpans.Load())
+	assert.ElementsMatch(t, []string{"one", "two"}, spanNames(sink),
+		"the merge carries both fragments' spans, not just their count")
 
 	// Flush-only job: no publish.
 	jobs <- &shards.FlushJob{
@@ -146,11 +166,16 @@ func TestFlusherPublishesDecodesAndConsumes(t *testing.T) {
 	jobs <- &shards.FlushJob{ID: id, Reason: bus.ReasonError, Need: shards.NeedPublish}
 	require.Eventually(t, func() bool { return spy.published() == 2 },
 		5*time.Second, time.Millisecond)
+	assert.Equal(t, uint64(2), fl.publishedKeeps.Load())
 	assert.Equal(t, 3, sink.SpanCount())
 }
 
 // consumer failure sends the intent back to the shard as a Retry; a
-// later tick re-collects. Uses a real Set so Retry has a live target.
+// later tick re-collects. Uses a real Set so Retry has a live target,
+// and the spy so the broadcast is counted: only the flush bit goes back,
+// so however many times the consume is retried the keep is published
+// exactly once. Re-parking the job's whole Need instead would rebroadcast
+// to every peer cluster on every tick.
 func TestFlusherConsumerFailureRetriesViaShard(t *testing.T) {
 	clk := newFakeProcClock(time.Unix(1000, 0))
 	jobs := make(chan *shards.FlushJob, 4)
@@ -165,18 +190,22 @@ func TestFlusherConsumerFailureRetriesViaShard(t *testing.T) {
 	fail.Store(true)
 	sink := new(consumertest.TracesSink)
 	flaky := newFlakyConsumer(t, &fail, sink)
-	fl := newFlusher(jobs, set, flaky, bus.NewLoopback())
+	spy := newBusSpy()
+	fl := newFlusher(jobs, set, flaky, spy)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
 	require.True(t, set.Keep(id, bus.ReasonError, clk.Now()))
-	require.Eventually(t, func() bool { return set.Stats().FlushRetries >= 1 },
+	require.Eventually(t, func() bool { return set.Stats().FlushRetries >= 3 },
 		5*time.Second, time.Millisecond, "failed consume returns as a shard retry")
+	assert.Equal(t, 1, spy.published(), "a consume retry must not rebroadcast the keep")
 
 	fail.Store(false)
 	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
 		5*time.Second, time.Millisecond, "tick-driven retry eventually flushes")
 	assert.GreaterOrEqual(t, fl.flushErrors.Load(), uint64(1))
+	assert.Equal(t, 1, spy.published(), "the flush that finally lands owes no broadcast")
+	assert.Equal(t, uint64(1), fl.publishedKeeps.Load())
 }
 
 // A permanent consumer error drops the job — counted, no retry loop.
@@ -326,15 +355,27 @@ func TestFlusherSkipsUndecodableFragment(t *testing.T) {
 	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
 		5*time.Second, time.Millisecond)
 	assert.Equal(t, uint64(1), fl.decodeErrors.Load())
+	require.Len(t, sink.AllTraces(), 1)
 
-	// All fragments undecodable: nothing reaches the pipeline at all.
+	// All fragments undecodable: every bad fragment is counted on its own,
+	// and the consumer is never handed the resulting empty batch.
 	jobs <- &shards.FlushJob{
 		ID: id, Need: shards.NeedFlush,
-		Frags: [][]byte{{0xFF, 0xFF}},
+		Frags: [][]byte{{0xFF, 0xFF}, {0xFE, 0xFE}},
 	}
-	require.Eventually(t, func() bool { return fl.decodeErrors.Load() == 2 },
+	require.Eventually(t, func() bool { return fl.decodeErrors.Load() == 3 },
+		5*time.Second, time.Millisecond, "decode failures count per fragment, not per job")
+
+	// A good job behind it: jobs are processed in order by the one flusher
+	// goroutine, so once this lands the empty job is provably finished and
+	// the batch count can be trusted.
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{encodeFrag(t, id, "closer")},
+	}
+	require.Eventually(t, func() bool { return sink.SpanCount() == 2 },
 		5*time.Second, time.Millisecond)
-	assert.Equal(t, 1, sink.SpanCount())
+	assert.Len(t, sink.AllTraces(), 2, "an all-undecodable job sends no empty batch")
 }
 
 // Without a Set there is nowhere to re-park a retryable failure; the
