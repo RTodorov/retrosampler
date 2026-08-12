@@ -14,6 +14,7 @@ one — never edit a merged ADR.
 | 006 | [Buffer architecture — marshal-on-ingest disk segments](006-buffer-architecture.md) | Accepted | 2026-08-11 |
 | 007 | [Concurrency and overload behaviour](007-concurrency-and-overload.md) | Accepted | 2026-08-11 |
 | 008 | [Keep decisions, pending keeps, and the bus contract](008-keep-decision-semantics.md) | Accepted | 2026-08-11 |
+| 009 | [Decision-plane contracts — keep-on-error, flusher, required buffer](009-decision-plane-contracts.md) | Accepted | 2026-08-13 |
 
 ## Conventions
 
