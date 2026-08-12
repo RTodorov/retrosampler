@@ -93,7 +93,9 @@ func (sh *shard) tick(s *Set) {
 	sh.atFloor.Store(atFloor)
 
 	if tMax, ok := sh.buf.OldestFinalizedTMax(); ok {
-		w := now.UnixNano() - tMax
+		// max: future-stamped data (producer clock ahead of ours) would
+		// otherwise report a negative window.
+		w := max(now.UnixNano()-tMax, 0)
 		if capN := int64(s.opts.Window); w > capN {
 			w = capN
 		}
