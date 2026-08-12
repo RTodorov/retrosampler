@@ -75,7 +75,7 @@ func TestFragmentGroupsByTrace(t *testing.T) {
 	}
 	got := map[pcommon.TraceID]int{}
 	f := New()
-	f.Fragment(td, func(id pcommon.TraceID, frag []byte) {
+	f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
 		dec, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(frag)
 		require.NoError(t, err)
 		got[id] = dec.SpanCount()
@@ -89,23 +89,92 @@ func TestFragmentGroupsByTrace(t *testing.T) {
 func TestFragmentScratchReuseAcrossCalls(t *testing.T) {
 	f := New()
 	td := testBatch(50, 5)
-	f.Fragment(td, func(pcommon.TraceID, []byte) {})
-	f.Fragment(td, func(_ pcommon.TraceID, frag []byte) {
+	f.Fragment(td, nil, func(pcommon.TraceID, []byte, bool) {})
+	f.Fragment(td, nil, func(_ pcommon.TraceID, frag []byte, _ bool) {
 		dec, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(frag)
 		require.NoError(t, err)
 		assert.Positive(t, dec.SpanCount())
 	})
 }
 
+// Detection is the OR of detect over each trace's spans in the batch,
+// delivered on the same callback as the fragment (single pass).
+func TestFragmentDetectFlagsPerTrace(t *testing.T) {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	mk := func(id byte, code ptrace.StatusCode) {
+		sp := ss.Spans().AppendEmpty()
+		sp.SetTraceID(pcommon.TraceID{id})
+		sp.Status().SetCode(code)
+	}
+	mk(1, ptrace.StatusCodeOk)
+	mk(2, ptrace.StatusCodeError) // trace 2: one bad span among good
+	mk(2, ptrace.StatusCodeOk)
+	mk(1, ptrace.StatusCodeOk)
+
+	got := map[byte]bool{}
+	New().Fragment(td, func(sp ptrace.Span) bool {
+		return sp.Status().Code() == ptrace.StatusCodeError
+	}, func(id pcommon.TraceID, _ []byte, keep bool) {
+		got[id[0]] = keep
+	})
+	assert.Equal(t, map[byte]bool{1: false, 2: true}, got)
+}
+
+// A hit on any span folds into the group, not just the trace's first span
+// in the batch — the usual shape, where an ok root precedes a failing child.
+func TestFragmentDetectHitAfterGroupOpens(t *testing.T) {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	for _, code := range []ptrace.StatusCode{ptrace.StatusCodeOk, ptrace.StatusCodeError} {
+		sp := ss.Spans().AppendEmpty()
+		sp.SetTraceID(pcommon.TraceID{1})
+		sp.Status().SetCode(code)
+	}
+	got := map[byte]bool{}
+	New().Fragment(td, func(sp ptrace.Span) bool {
+		return sp.Status().Code() == ptrace.StatusCodeError
+	}, func(id pcommon.TraceID, _ []byte, keep bool) {
+		got[id[0]] = keep
+	})
+	assert.Equal(t, map[byte]bool{1: true}, got)
+}
+
+func TestFragmentNilDetectNeverKeeps(t *testing.T) {
+	td := ptrace.NewTraces()
+	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	sp.SetTraceID(pcommon.TraceID{1})
+	sp.Status().SetCode(ptrace.StatusCodeError)
+	New().Fragment(td, nil, func(_ pcommon.TraceID, _ []byte, keep bool) {
+		assert.False(t, keep)
+	})
+}
+
 func TestFragmentZeroAllocSteadyState(t *testing.T) {
 	f := New()
 	td := testBatch(100, 4)
-	noop := func(pcommon.TraceID, []byte) {}
+	noop := func(pcommon.TraceID, []byte, bool) {}
 	for range 100 { // warm every internal high-water mark
-		f.Fragment(td, noop)
+		f.Fragment(td, nil, noop)
 	}
 	avg := testing.AllocsPerRun(100, func() {
-		f.Fragment(td, noop)
+		f.Fragment(td, nil, noop)
 	})
 	assert.Zero(t, avg, "hot-path bookkeeping allocs must be 0 (ADR-004 r2)")
+}
+
+// The shipping path passes a real detect, so the allocation gate has to hold
+// with the predicate wired in, not only for the nil case.
+func TestFragmentZeroAllocWithDetect(t *testing.T) {
+	f := New()
+	td := testBatch(100, 4)
+	noop := func(pcommon.TraceID, []byte, bool) {}
+	detect := func(sp ptrace.Span) bool { return sp.Status().Code() == ptrace.StatusCodeError }
+	for range 100 { // warm every internal high-water mark
+		f.Fragment(td, detect, noop)
+	}
+	avg := testing.AllocsPerRun(100, func() {
+		f.Fragment(td, detect, noop)
+	})
+	assert.Zero(t, avg, "detect must not allocate on the hot path (ADR-004 r2)")
 }
