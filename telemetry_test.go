@@ -205,14 +205,20 @@ func TestTelemetryCountsRefusedPublishes(t *testing.T) {
 	_, err := p.processTraces(ctx, errorSpanBatch(pcommon.TraceID{0xC3}, "unpublishable"))
 	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
 
+	// Both in one wait: publish.errors moves on the flusher goroutine and
+	// flush.retries on the shard worker that receives its Retry, so the
+	// second trails the first by a handoff.
 	require.Eventually(t, func() bool {
-		v, ok := metricInt64(tt, metricPrefix+"publish.errors")
-		return ok && v >= 1
-	}, 10*time.Second, 10*time.Millisecond, "the refused publish is counted")
+		refused, ok := metricInt64(tt, metricPrefix+"publish.errors")
+		if !ok || refused < 1 {
+			return false
+		}
+		parked, ok := metricInt64(tt, metricPrefix+"flush.retries")
+		return ok && parked >= 1
+	}, 10*time.Second, 10*time.Millisecond,
+		"the refused publish is counted and its need-bit re-parked for the tick to retry")
 	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"published.keeps"),
 		"nothing reached the bus")
-	assert.Positive(t, requireMetricInt64(t, tt, metricPrefix+"flush.retries"),
-		"the publish need-bit is re-parked for the tick to retry")
 }
 
 // corrupt.fragments is the one counter fed from two places: fragments
@@ -264,6 +270,13 @@ func TestTelemetryReportsNothingBeforeStart(t *testing.T) {
 // collector's meter outlives the processor, and a monotone counter that
 // dropped to zero on shutdown would read downstream as a counter reset
 // — a spurious spike on every restart.
+//
+// The drained shutdown path has its own unbind, distinct from the no-op
+// path TestTelemetryUnbindsWithoutStart covers, and an empty collection
+// does not prove it ran: callbacks that survived would report nothing
+// against the nil set anyway. So the shutdown set is pushed back in
+// afterwards, still carrying its non-zero counters. Any surviving
+// registration reports them.
 func TestTelemetryGoesSilentAfterShutdown(t *testing.T) {
 	tt := newTestTelemetry(t)
 	cfg := createDefaultConfig().(*Config)
@@ -272,19 +285,31 @@ func TestTelemetryGoesSilentAfterShutdown(t *testing.T) {
 	cfg.Shards = 1
 	sink := new(consumertest.TracesSink)
 	ctx := context.Background()
-	p, err := NewFactory().CreateTraces(ctx, metadatatest.NewSettings(tt), cfg, sink)
-	require.NoError(t, err)
-	require.NoError(t, p.Start(ctx, componenttest.NewNopHost()))
+	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p.next = sink
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
 
-	require.NoError(t, p.ConsumeTraces(ctx, errorSpanBatch(pcommon.TraceID{0x1D}, "counted")))
+	_, err := p.processTraces(ctx, errorSpanBatch(pcommon.TraceID{0x1D}, "counted"))
+	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
 	require.Eventually(t, func() bool {
 		v, ok := metricInt64(tt, metricPrefix+"kept.local")
 		return ok && v == 1
 	}, 5*time.Second, time.Millisecond, "the counter is live before shutdown")
 
-	require.NoError(t, p.Shutdown(ctx))
+	// Captured before the swap, and still readable afterwards: Stats and
+	// the length mirrors are plain atomics on a stopped set.
+	s := p.set.Load()
+	require.NotNil(t, s)
+	require.NoError(t, p.shutdown(ctx))
 	assert.Empty(t, reportedInstruments(t, tt),
 		"a retired processor observes nothing rather than a reset to zero")
+
+	require.Equal(t, uint64(1), s.Stats().KeptLocal,
+		"the set still holds the counters a surviving callback would find")
+	p.set.Store(s)
+	assert.Empty(t, reportedInstruments(t, tt),
+		"the drained shutdown dropped the callbacks, so a live set goes unreported")
 }
 
 // The builder is bound at construction, so the unbinding cannot depend
