@@ -23,15 +23,51 @@ fi
   echo "no baseline for class '$class' — run make bench-baseline on the reference machine" >&2
   exit 1
 }
-# benchstat CSV: rows grouped per metric table; delta column is last.
+# benchstat CSV: one table per metric, each opened by header rows whose first
+# field is empty. The metric header also names the delta column ("vs base"),
+# which is NOT last - a P-value column follows it - and a table without one
+# (a benchmark only one side ran) compares nothing.
+# Both the metric and the delta column reset per table, so an ungated metric
+# cannot inherit "time" from the table above it.
+# scripts/bench_gate_selftest.sh holds this parsing to both directions.
 benchstat -format csv "$base" bench-new.txt | awk -F, '
-  tolower($0) ~ /sec\/op/ { metric = "time" }
-  tolower($0) ~ /allocs\/op/ { metric = "allocs" }
-  $NF ~ /^[+-][0-9.]+%$/ {
-    d = $NF; gsub(/[+%]/, "", d); delta = d + 0
-    if (metric == "time" && delta > 10) { print "FAIL time/op +" delta "% : " $1; bad = 1 }
-    if (metric == "allocs" && delta > 0) { print "FAIL allocs/op +" delta "% : " $1; bad = 1 }
+  $1 == "" {
+    metric = ""
+    if ($2 == "sec/op") { metric = "time" }
+    if ($2 == "allocs/op") { metric = "allocs" }
+    delta_col = 0; base_col = 0; new_col = 0
+    for (i = 2; i <= NF; i++) {
+      if ($i == "vs base") { delta_col = i }
+      else if ($i == $2) {
+        if (base_col == 0) { base_col = i } else if (new_col == 0) { new_col = i }
+      }
+    }
+    next
   }
-  END { exit bad }
+  $1 == "geomean" { next }
+  metric != "" && delta_col > 0 && NF >= delta_col && $base_col != "" && $new_col != "" {
+    # A benchmark only one side ran keeps its table but yields a truncated,
+    # one-sided row - never a comparison, whatever the header promises.
+    compared = 1
+    d = $delta_col
+    if (d ~ /^[+-][0-9.]+%$/) {
+      gsub(/[+%]/, "", d); delta = d + 0
+      if (metric == "time" && delta > 10) { print "FAIL time/op +" delta "% : " $1; bad = 1 }
+      if (metric == "allocs" && delta > 0) { print "FAIL allocs/op +" delta "% : " $1; bad = 1 }
+    } else if (d == "?" && metric == "allocs" && base_col > 0 && new_col > 0 &&
+               $new_col + 0 > $base_col + 0) {
+      # benchstat cannot express a ratio against a zero baseline and prints
+      # "?", so the percentage branch above never sees the one regression the
+      # zero-alloc hot path can have: 0 -> N (ADR-004 r2).
+      print "FAIL allocs/op " $base_col " -> " $new_col " : " $1; bad = 1
+    }
+  }
+  END {
+    if (!compared && !bad) {
+      print "no benchmark paired with the baseline; the gate compared nothing" > "/dev/stderr"
+      exit 1
+    }
+    exit bad
+  }
 '
 echo "bench gate OK (class $class)"

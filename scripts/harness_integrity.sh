@@ -10,6 +10,8 @@ if [[ -n "$hits" ]]; then
   echo "$hits" >&2
   exit 1
 fi
+# C8: the bench gate must still be able to fail (see bench_gate_selftest.sh).
+scripts/bench_gate_selftest.sh
 # C9: whole-tree banned-token sweep (see banned_tokens.sh).
 scripts/banned_tokens.sh
 echo "harness integrity OK"
