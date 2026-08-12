@@ -182,9 +182,11 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 // live.
 //
 // After fl.stop the workers keep draining their queues into the jobs
-// channel buffer, or park the intents when it fills. Either way the
-// fragments are on disk and the keeps are recorded, so nothing kept is
-// lost — it is replayed from the buffer on the next start.
+// channel buffer, or park the intents when it fills. The fragments are
+// on disk and a durable bus replays broadcast keeps within its horizon,
+// but a keep detected here and not yet published dies with the process:
+// detection runs at ingest only, never over recovered fragments. That is
+// ADR-009 r6's accepted crash window, not a drain this can close.
 func (p *retroProcessor) shutdown(ctx context.Context) error {
 	s := p.set.Swap(nil)
 	if s == nil {
