@@ -30,7 +30,14 @@ fi
 # Both the metric and the delta column reset per table, so an ungated metric
 # cannot inherit "time" from the table above it.
 # scripts/bench_gate_selftest.sh holds this parsing to both directions.
-benchstat -format csv "$base" bench-new.txt | awk -F, '
+#
+# gated is the size of ADR-004 r5's gated set (BenchmarkIngest, KeepFlush,
+# Expiry): that many benchmarks must actually pair, or benchmarks have gone
+# missing from the run and their regressions with them. Move it when the ADR
+# moves the set. Baseline rows with no counterpart by design - BenchmarkOffer
+# is committed as reference data, not gated - simply do not count toward it.
+gated=3
+paired=$(benchstat -format csv "$base" bench-new.txt | awk -F, -v gated="$gated" '
   $1 == "" {
     metric = ""
     if ($2 == "sec/op") { metric = "time" }
@@ -48,26 +55,29 @@ benchstat -format csv "$base" bench-new.txt | awk -F, '
   metric != "" && delta_col > 0 && NF >= delta_col && $base_col != "" && $new_col != "" {
     # A benchmark only one side ran keeps its table but yields a truncated,
     # one-sided row - never a comparison, whatever the header promises.
-    compared = 1
+    compared[$1] = 1
     d = $delta_col
     if (d ~ /^[+-][0-9.]+%$/) {
       gsub(/[+%]/, "", d); delta = d + 0
-      if (metric == "time" && delta > 10) { print "FAIL time/op +" delta "% : " $1; bad = 1 }
-      if (metric == "allocs" && delta > 0) { print "FAIL allocs/op +" delta "% : " $1; bad = 1 }
+      if (metric == "time" && delta > 10) { print "FAIL time/op +" delta "% : " $1 > "/dev/stderr"; bad = 1 }
+      if (metric == "allocs" && delta > 0) { print "FAIL allocs/op +" delta "% : " $1 > "/dev/stderr"; bad = 1 }
     } else if (d == "?" && metric == "allocs" && base_col > 0 && new_col > 0 &&
                $new_col + 0 > $base_col + 0) {
       # benchstat cannot express a ratio against a zero baseline and prints
       # "?", so the percentage branch above never sees the one regression the
       # zero-alloc hot path can have: 0 -> N (ADR-004 r2).
-      print "FAIL allocs/op " $base_col " -> " $new_col " : " $1; bad = 1
+      print "FAIL allocs/op " $base_col " -> " $new_col " : " $1 > "/dev/stderr"; bad = 1
     }
   }
   END {
-    if (!compared && !bad) {
-      print "no benchmark paired with the baseline; the gate compared nothing" > "/dev/stderr"
-      exit 1
+    n = 0
+    for (b in compared) { n++ }
+    if (n < gated) {
+      print "FAIL " n " of " gated " gated benchmarks paired with the baseline" > "/dev/stderr"
+      bad = 1
     }
-    exit bad
+    if (bad) { exit 1 }
+    print n
   }
-'
-echo "bench gate OK (class $class)"
+')
+echo "bench gate OK (class $class, $paired compared)"
