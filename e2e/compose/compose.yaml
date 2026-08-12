@@ -21,12 +21,24 @@ services:
     ports:
       - "43182:4317"
 
+  # Error loadgens are the kept population and are counted exactly; the
+  # -ok loadgens are the dropped population and must leave nothing behind.
   loadgen-1:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
+    profiles: [load]
+    command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-1:4317", "--traces", "5000", "--rate", "200", "--status-code", "Error"]
+
+  loadgen-1-ok:
     image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
     profiles: [load]
     command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-1:4317", "--traces", "5000", "--rate", "200"]
 
   loadgen-2:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
+    profiles: [load]
+    command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-2:4317", "--traces", "5000", "--rate", "200", "--status-code", "Error"]
+
+  loadgen-2-ok:
     image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.158.0
     profiles: [load]
     command: ["traces", "--otlp-insecure", "--otlp-endpoint", "retrosampler-2:4317", "--traces", "5000", "--rate", "200"]

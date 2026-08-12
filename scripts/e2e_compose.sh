@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Compose e2e gate: two instances, paced load, exact span conservation.
+# Compose e2e gate: two instances, paced load, exact kept-span conservation.
+# Retention (ADR-009): each instance must emit every error span and no
+# healthy one.
 # Functional assertions only — perf floors live in make testbed (ADR-004 r4).
 set -euo pipefail
 cd "$(dirname "$0")/../e2e/compose"
@@ -27,20 +29,27 @@ for port in 43181 43182; do
     exit 1
   }
 done
-compose run --rm -T loadgen-1 &
-p1=$!
-compose run --rm -T loadgen-2 &
-p2=$!
-wait $p1 || {
-  echo "FAIL: loadgen-1 errored" >&2
-  exit 1
-}
-wait $p2 || {
-  echo "FAIL: loadgen-2 errored" >&2
-  exit 1
-}
+loadgens=(loadgen-1 loadgen-1-ok loadgen-2 loadgen-2-ok)
+pids=()
+for lg in "${loadgens[@]}"; do
+  compose run --rm -T "$lg" &
+  pids+=("$!")
+done
+for i in "${!loadgens[@]}"; do
+  wait "${pids[$i]}" || {
+    echo "FAIL: ${loadgens[$i]} errored" >&2
+    exit 1
+  }
+done
 count() {
-  jq -s '[.[].resourceSpans[]?.scopeSpans[]?.spans[]?] | length' "out/$1/traces.json" 2>/dev/null || echo 0
+  jq -s '[.[].resourceSpans[]?.scopeSpans[]?.spans[]? | select((.status.code // 0) == 2)] | length' \
+    "out/$1/traces.json" 2>/dev/null || echo 0
+}
+# No fallback: a file this cannot parse must abort rather than read as
+# "nothing leaked".
+leaked() {
+  jq -s '[.[].resourceSpans[]?.scopeSpans[]?.spans[]? | select((.status.code // 0) != 2)] | length' \
+    "out/$1/traces.json"
 }
 c1=0
 c2=0
@@ -51,9 +60,17 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if [[ "$c1" -ne "$WANT" || "$c2" -ne "$WANT" ]]; then
-  echo "FAIL: span conservation violated" >&2
-  echo "  instance 1: want $WANT got $c1" >&2
-  echo "  instance 2: want $WANT got $c2" >&2
+  echo "FAIL: kept-span conservation violated" >&2
+  echo "  instance 1: want $WANT error spans got $c1" >&2
+  echo "  instance 2: want $WANT error spans got $c2" >&2
   exit 1
 fi
-echo "e2e-compose OK: $c1 + $c2 spans conserved across 2 instances"
+l1=$(leaked 1)
+l2=$(leaked 2)
+if [[ "$l1" -ne 0 || "$l2" -ne 0 ]]; then
+  echo "FAIL: healthy spans leaked through retention" >&2
+  echo "  instance 1: $l1 non-error spans" >&2
+  echo "  instance 2: $l2 non-error spans" >&2
+  exit 1
+fi
+echo "e2e-compose OK: $c1 + $c2 error spans kept, healthy spans dropped"
