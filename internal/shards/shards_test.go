@@ -29,14 +29,17 @@ func TestShardForSpreadsAndIsStable(t *testing.T) {
 func TestNewValidatesOptions(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	for name, mut := range map[string]func(*Options){
-		"zero shards":     func(o *Options) { o.Shards = 0 },
-		"zero window":     func(o *Options) { o.Window = 0 },
-		"zero budget":     func(o *Options) { o.DiskBudget = 0 },
-		"pct zero":        func(o *Options) { o.WatermarkPct = 0 },
-		"pct over 100":    func(o *Options) { o.WatermarkPct = 101 },
-		"zero floor":      func(o *Options) { o.WindowFloor = 0 },
-		"floor at window": func(o *Options) { o.WindowFloor = o.Window },
-		"nil clock":       func(o *Options) { o.Now = nil },
+		"zero shards": func(o *Options) { o.Shards = 0 },
+		"zero window": func(o *Options) { o.Window = 0 },
+		"zero budget": func(o *Options) { o.DiskBudget = 0 },
+		// buffer.Open defaults a zero SegmentSize to 32 MiB, so the floor
+		// below would be computed from 0 while the segments are 32 MiB.
+		"zero segment size": func(o *Options) { o.SegmentSize = 0 },
+		"pct zero":          func(o *Options) { o.WatermarkPct = 0 },
+		"pct over 100":      func(o *Options) { o.WatermarkPct = 101 },
+		"zero floor":        func(o *Options) { o.WindowFloor = 0 },
+		"floor at window":   func(o *Options) { o.WindowFloor = o.Window },
+		"nil clock":         func(o *Options) { o.Now = nil },
 		// 4 shards x 1 MiB active segments are unreclaimable, so a 4 MiB
 		// budget puts the watermark under that floor for good.
 		"watermark under the active-segment floor": func(o *Options) { o.DiskBudget = 4 << 20 },
@@ -55,21 +58,33 @@ func TestNewValidatesOptions(t *testing.T) {
 // than start something silently useless.
 func TestNewWatermarkFloorCliffIsExact(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
-	// testOptions is 4 shards x 1 MiB segments: a 4194304-byte floor.
-	// At WatermarkPct 80 the watermark (DiskBudget/100*WatermarkPct, the
-	// tick's own expression) first clears it at DiskBudget 5242900 —
-	// 52429*80 = 4194320 — one step above 5242800's 4194240.
+	// testOptions' segments are 1 MiB, so each case's floor is shards MiB
+	// and its watermark is DiskBudget/100*pct, the tick's own expression.
 	for name, tc := range map[string]struct {
+		shards int
+		pct    int
 		budget int64
 		ok     bool
 	}{
-		"one step under the floor": {5242800, false},
-		"one step over the floor":  {5242900, true},
+		// 4 shards is a 4194304-byte floor, which at pct 80 the watermark
+		// first clears at budget 5242900 — 52429*80 = 4194320 — one step
+		// above 5242800's 4194240.
+		"one step under the floor": {4, 80, 5242800, false},
+		"one step over the floor":  {4, 80, 5242900, true},
+		// 1 shard at pct 64 lands on the floor exactly — 16384*64 =
+		// 1048576 — so the comparison must reject its own boundary.
+		"exactly on the floor":          {1, 64, 1_638_400, false},
+		"one step over the exact floor": {1, 64, 1_638_500, true},
+		// pct 100 is in range and truncates 2 MiB to a 2097100-byte
+		// watermark, well clear of the 1048576-byte floor.
+		"whole budget at pct 100": {1, 100, 2 << 20, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions(t.TempDir(), clk)
-			require.Equal(t, int64(4194304), int64(opts.Shards)*int64(opts.SegmentSize),
-				"the budgets above are computed against this floor")
+			require.Equal(t, 1<<20, opts.SegmentSize,
+				"the budgets above are computed against this segment size")
+			opts.Shards = tc.shards
+			opts.WatermarkPct = tc.pct
 			opts.DiskBudget = tc.budget
 			s, err := New(opts)
 			if !tc.ok {
