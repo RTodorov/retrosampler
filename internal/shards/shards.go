@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,7 +152,11 @@ type Set struct {
 	flushRetries           atomic.Uint64
 	expiredBytes           atomic.Int64
 
-	intake   atomic.Bool
+	intake atomic.Bool
+	// inflight counts enqueues that have passed the intake check and are
+	// still mid-send. Shutdown waits it out before stopping the workers,
+	// so an accepted event can never land on a drained queue.
+	inflight atomic.Int64
 	stopOnce sync.Once
 }
 
@@ -250,12 +255,14 @@ func New(opts Options) (*Set, error) {
 // 3). After Shutdown it is a no-op returning false.
 //
 // Conservation — every offered fragment is buffered or counted as shed —
-// is guaranteed only for Offers that complete before Shutdown begins. An
-// Offer racing Shutdown may enqueue onto a worker that has already
-// drained and exited, and that fragment is then dropped uncounted; in
-// shadow mode the span still passes through the pipeline. Closing the
-// race is stage-3 work, landing with retention.
+// holds against a concurrent Shutdown as well: the in-flight token this
+// call holds keeps the workers alive until its send has landed in a
+// queue (see Shutdown).
 func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) bool {
+	// Increment before the check, so a Shutdown that has already stored
+	// intake-off sees the token of an Offer that read intake as still on.
+	s.inflight.Add(1)
+	defer s.inflight.Add(-1)
 	if !s.intake.Load() {
 		return false
 	}
@@ -308,6 +315,8 @@ func (s *Set) KeepFromBus(id [16]byte, reason byte, now time.Time, abort <-chan 
 // tick, so a retry never carries fragments back across the queue. It also
 // skips the decided check: the trace has already decided.
 func (s *Set) Retry(id [16]byte, reason byte, need Need, abort <-chan struct{}) bool {
+	s.inflight.Add(1)
+	defer s.inflight.Add(-1)
 	if !s.intake.Load() {
 		return false
 	}
@@ -332,6 +341,8 @@ func (s *Set) Retry(id [16]byte, reason byte, need Need, abort <-chan struct{}) 
 func (s *Set) enqueueKeep(id [16]byte, origin Origin, reason byte, now time.Time,
 	abort <-chan struct{}, block bool,
 ) bool {
+	s.inflight.Add(1)
+	defer s.inflight.Add(-1)
 	if !s.intake.Load() {
 		return false
 	}
@@ -361,16 +372,29 @@ func (s *Set) enqueueKeep(id [16]byte, origin Origin, reason byte, now time.Time
 	return true
 }
 
-// Shutdown stops intake, signals every worker to drain and close its
+// Shutdown stops intake, waits for the enqueues already past the intake
+// check to land, then signals every worker to drain and close its
 // buffer, and waits for them, honouring ctx (ADR-007 r6). Safe to call
 // repeatedly: a timed-out Shutdown can be retried.
 //
-// It drains what the queues hold when the workers observe the stop, so
-// it conserves every Offer that completed before this call. A fragment
-// accepted concurrently with Shutdown may be dropped uncounted instead
-// (see Offer).
+// That quiesce is what makes the drain conserving: an accepted enqueue
+// holds an in-flight token across its whole send, so nothing it accepted
+// can land on a queue whose worker has already drained. The blocking
+// sends (KeepFromBus, Retry) hold their token while they wait, and the
+// workers are still running through the quiesce, so an exhausted free
+// ring refills and the send completes. One waiting on a ring nothing
+// will refill is bounded by ctx: the quiesce loop returns ctx.Err(), and
+// the Shutdown can be retried.
 func (s *Set) Shutdown(ctx context.Context) error {
 	s.intake.Store(false)
+	for s.inflight.Load() != 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			runtime.Gosched()
+		}
+	}
 	s.stopOnce.Do(func() {
 		for _, sh := range s.shards {
 			close(sh.stop)

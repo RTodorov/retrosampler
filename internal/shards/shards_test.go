@@ -6,6 +6,7 @@ package shards
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +149,49 @@ func TestConservationConcurrent(t *testing.T) {
 	got := collectAll(t, dir, opts, ids)
 	assert.Equal(t, uint64(goroutines*perG), got+shedTotal(st),
 		"concurrent ingest: every fragment buffered or counted as shed")
+}
+
+// Every Offer that reported true is conserved even when Shutdown races
+// the offering goroutines: accepted fragments reach disk (or a shed
+// counter) — never a silent drop. Stage-2 documented this race away;
+// retention makes it a correctness bug.
+func TestOfferVsShutdownConservation(t *testing.T) {
+	const goroutines, perG = 8, 500
+	var ids [][16]byte
+	for n := range uint64(goroutines * perG) {
+		ids = append(ids, testID(n))
+	}
+	for round := range 20 {
+		dir := t.TempDir()
+		clk := newFakeClock(time.Unix(1000, 0))
+		opts := testOptions(dir, clk)
+		s := mustNew(t, opts)
+
+		var accepted atomic.Uint64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for g := range uint64(goroutines) {
+			wg.Add(1)
+			go func(g uint64) {
+				defer wg.Done()
+				<-start
+				for n := range uint64(perG) {
+					if s.Offer(testID(g*perG+n), []byte("x"), clk.Now()) {
+						accepted.Add(1)
+					}
+				}
+			}(g)
+		}
+		close(start)
+		time.Sleep(time.Duration(round) * 100 * time.Microsecond) // vary the race window
+		require.NoError(t, s.Shutdown(context.Background()))
+		wg.Wait()
+
+		st := s.Stats()
+		require.Zero(t, st.AppendErrors)
+		require.Equal(t, accepted.Load(), collectAll(t, dir, opts, ids),
+			"round %d: every accepted fragment is on disk", round)
+	}
 }
 
 func TestShutdownIsIdempotent(t *testing.T) {
