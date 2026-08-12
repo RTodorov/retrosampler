@@ -58,6 +58,10 @@ type Options struct {
 	Now func() time.Time
 	// Tick is the per-shard expiry tick interval. Defaults to 1s.
 	Tick time.Duration
+	// Flush receives the jobs shard workers produce for kept traces.
+	// The send is non-blocking: a full (or nil) channel parks the
+	// intent per shard for retry on its tick. nil is test-only.
+	Flush chan<- *FlushJob
 
 	// dequeueHook, when set, runs in each worker at the top of its
 	// loop. Test-only: lets tests wedge a worker deterministically.
@@ -73,6 +77,7 @@ type eventKind uint8
 const (
 	evFrag eventKind = iota
 	evKeep
+	evRetry
 )
 
 // Origin says which side produced a keep.
@@ -104,6 +109,9 @@ type Stats struct {
 	KeptLocal              uint64
 	KeptBus                uint64
 	DuplicateKeeps         uint64
+	CorruptFragments       uint64
+	FlushRetries           uint64
+	ExpiredBytes           int64
 }
 
 // fragBuf is one recycled handoff buffer: a queue event with its routing
@@ -117,6 +125,9 @@ type fragBuf struct {
 	kind   eventKind
 	origin Origin
 	reason byte
+	// need is the evRetry work the flusher handed back; unused by the
+	// other kinds.
+	need Need
 }
 
 // Set owns the shard workers and the ladder state shared across them.
@@ -136,6 +147,9 @@ type Set struct {
 	keptLocal              atomic.Uint64
 	keptBus                atomic.Uint64
 	duplicateKeeps         atomic.Uint64
+	corruptFragments       atomic.Uint64
+	flushRetries           atomic.Uint64
+	expiredBytes           atomic.Int64
 
 	intake   atomic.Bool
 	stopOnce sync.Once
@@ -211,6 +225,7 @@ func New(opts Options) (*Set, error) {
 		sh := &shard{
 			buf:  b,
 			dec:  newDecidedSet(),
+			pend: make(map[[16]byte]pendReq),
 			work: make(chan *fragBuf, queueDepth),
 			free: make(chan *fragBuf, queueDepth),
 			stop: make(chan struct{}),
@@ -282,6 +297,34 @@ func (s *Set) Keep(id [16]byte, reason byte, now time.Time) bool {
 // silently shed. A nil abort blocks indefinitely.
 func (s *Set) KeepFromBus(id [16]byte, reason byte, now time.Time, abort <-chan struct{}) bool {
 	return s.enqueueKeep(id, OriginBus, reason, now, abort, true)
+}
+
+// Retry re-queues flush work that failed downstream. It blocks on a full
+// free ring (abort to bail): losing a retry loses a kept trace's
+// fragments. After Shutdown it reports false and the intent dies with the
+// process — the fragments are on disk for a durable-bus replay.
+//
+// The worker parks the need-bits and replays them from disk on its next
+// tick, so a retry never carries fragments back across the queue. It also
+// skips the decided check: the trace has already decided.
+func (s *Set) Retry(id [16]byte, reason byte, need Need, abort <-chan struct{}) bool {
+	if !s.intake.Load() {
+		return false
+	}
+	sh := s.shards[shardFor(id, len(s.shards))]
+	var fb *fragBuf
+	select {
+	case fb = <-sh.free:
+	case <-abort:
+		return false
+	}
+	fb.kind = evRetry
+	fb.id = id
+	fb.reason = reason
+	fb.need = need
+	fb.data = fb.data[:0]
+	sh.work <- fb
+	return true
 }
 
 // enqueueKeep hands a keep verdict to id's shard, waiting for a free
@@ -363,7 +406,21 @@ func (s *Set) Stats() Stats {
 		KeptLocal:              s.keptLocal.Load(),
 		KeptBus:                s.keptBus.Load(),
 		DuplicateKeeps:         s.duplicateKeeps.Load(),
+		CorruptFragments:       s.corruptFragments.Load(),
+		FlushRetries:           s.flushRetries.Load(),
+		ExpiredBytes:           s.expiredBytes.Load(),
 	}
+}
+
+// PendingFlushes reports the parked flush intents across shards as of the
+// last ticks. Each worker owns its pending map outright, so the value is a
+// sum of per-shard mirrors published on tick, not a live count.
+func (s *Set) PendingFlushes() int64 {
+	var n int64
+	for _, sh := range s.shards {
+		n += sh.pendLen.Load()
+	}
+	return n
 }
 
 // DecidedEntries reports the pending-keeps population across shards as of
