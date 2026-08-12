@@ -151,12 +151,87 @@ func TestConservationConcurrent(t *testing.T) {
 		"concurrent ingest: every fragment buffered or counted as shed")
 }
 
+// blockedBusKeep starts a one-shard Set whose worker is wedged and whose
+// free ring it then exhausts, so the bus keep it launches blocks holding
+// an in-flight token. It returns the keep's result, the abort that
+// releases it, and the release that unwedges the worker — both idempotent
+// and both run at cleanup, so a failed assertion cannot strand the keep
+// goroutine and turn a plain failure into a goleak one.
+func blockedBusKeep(t *testing.T) (s *Set, done <-chan bool, abortNow, release func()) {
+	t.Helper()
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.Shards = 1 // one free ring to exhaust
+	wedge := make(chan struct{})
+	opts.dequeueHook = func() { <-wedge }
+	s = mustNew(t, opts)
+	abort := make(chan struct{})
+	abortNow = sync.OnceFunc(func() { close(abort) })
+	release = sync.OnceFunc(func() { close(wedge) })
+	t.Cleanup(func() {
+		abortNow()
+		release()
+		require.NoError(t, s.Shutdown(context.Background()))
+	})
+
+	id := testID(1)
+	for range queueDepth {
+		require.True(t, s.Offer(id, []byte("x"), clk.Now()))
+	}
+	res := make(chan bool, 1)
+	go func() { res <- s.KeepFromBus(id, 1, clk.Now(), abort) }()
+	require.Eventually(t, func() bool { return s.inflight.Load() == 1 },
+		5*time.Second, time.Millisecond, "the bus keep blocks mid-enqueue, holding its token")
+	return s, res, abortNow, release
+}
+
+// A quiesce that times out is deliberately inert: with an accepted
+// enqueue still in flight, Shutdown reports the deadline and leaves stop
+// unsignalled rather than let the workers drain out from under the send.
+// The shutdown is not lost — intake is already off, so the blockage can
+// only clear — and the retry completes once the worker frees a buffer and
+// the sender lands.
+func TestQuiescedShutdownTimesOutWithoutStoppingTheWorkers(t *testing.T) {
+	s, done, _, release := blockedBusKeep(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, s.Shutdown(ctx), context.DeadlineExceeded)
+	select {
+	case <-s.shards[0].stop:
+		require.Fail(t, "stop must stay unsignalled while an accepted enqueue is in flight")
+	default:
+	}
+
+	release() // the worker drains, recycling the buffer the keep waits on
+	assert.True(t, <-done, "the blocked keep still lands: it was accepted before intake closed")
+	require.NoError(t, s.Shutdown(context.Background()), "the retry completes once the sender lands")
+	waitKept(t, s, 0, 1, 0)
+}
+
+// The other way out of the same block: the sender gives up on its own
+// abort channel — the bound Shutdown's ctx does not provide — and the
+// retried Shutdown then completes just as cleanly.
+func TestQuiescedShutdownCompletesAfterTheSenderAborts(t *testing.T) {
+	s, done, abortNow, release := blockedBusKeep(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, s.Shutdown(ctx), context.DeadlineExceeded)
+
+	abortNow()
+	assert.False(t, <-done, "an aborted keep reports refusal, never a silent drop")
+	release()
+	require.NoError(t, s.Shutdown(context.Background()), "the retry completes once the sender gives up")
+	assert.Zero(t, s.Stats().KeptBus, "the aborted keep was never enqueued")
+}
+
 // Every Offer that reported true is conserved even when Shutdown races
 // the offering goroutines: accepted fragments reach disk (or a shed
 // counter) — never a silent drop. Stage-2 documented this race away;
 // retention makes it a correctness bug.
 func TestOfferVsShutdownConservation(t *testing.T) {
-	const goroutines, perG = 8, 500
+	const goroutines, perG, seed = 8, 500, 8
 	var ids [][16]byte
 	for n := range uint64(goroutines * perG) {
 		ids = append(ids, testID(n))
@@ -167,7 +242,15 @@ func TestOfferVsShutdownConservation(t *testing.T) {
 		opts := testOptions(dir, clk)
 		s := mustNew(t, opts)
 
+		// Seeded before the racers, so every round has something to
+		// conserve: at round 0 Shutdown beats all eight goroutines to the
+		// intake flag, and the identity would otherwise hold 0 against 0.
 		var accepted atomic.Uint64
+		for n := range uint64(seed) {
+			require.True(t, s.Offer(testID(n), []byte("x"), clk.Now()))
+			accepted.Add(1)
+		}
+
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		for g := range uint64(goroutines) {
@@ -189,6 +272,7 @@ func TestOfferVsShutdownConservation(t *testing.T) {
 
 		st := s.Stats()
 		require.Zero(t, st.AppendErrors)
+		require.Positive(t, accepted.Load(), "round %d: nothing accepted, so nothing to conserve", round)
 		require.Equal(t, accepted.Load(), collectAll(t, dir, opts, ids),
 			"round %d: every accepted fragment is on disk", round)
 	}

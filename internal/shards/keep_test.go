@@ -224,7 +224,17 @@ func TestKeepAndRetryVsShutdownConservation(t *testing.T) {
 
 		wedged := make(chan struct{})
 		watchdog := time.AfterFunc(30*time.Second, func() { close(wedged) })
+
+		// Seeded before the racers, so every round has something to
+		// conserve: at round 0 Shutdown beats all eight goroutines to the
+		// intake flag, and both identities would hold 0 against 0.
 		var keeps, retries atomic.Uint64
+		require.True(t, s.Keep(testID(0), 1, clk.Now()))
+		require.True(t, s.KeepFromBus(testID(1), 1, clk.Now(), wedged))
+		require.True(t, s.Retry(testID(2), 1, NeedFlush, wedged))
+		keeps.Add(2)
+		retries.Add(1)
+
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		for g := range uint64(goroutines) {
@@ -260,6 +270,8 @@ func TestKeepAndRetryVsShutdownConservation(t *testing.T) {
 		require.True(t, watchdog.Stop(), "a blocking enqueue waited past the quiesce")
 
 		st := s.Stats()
+		require.Positive(t, keeps.Load(), "round %d: no keep accepted, so nothing to conserve", round)
+		require.Positive(t, retries.Load(), "round %d: no retry accepted, so nothing to conserve", round)
 		require.Equal(t, keeps.Load(), st.KeptLocal+st.KeptBus+st.DuplicateKeeps,
 			"round %d: every accepted keep is acted on exactly once", round)
 		require.Equal(t, retries.Load(), st.FlushRetries,
