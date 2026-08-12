@@ -57,6 +57,13 @@ func testOptions(dir string, clk *fakeClock) Options {
 	}
 }
 
+// floorShed sums the window-floor rung's two causes, and shedTotal adds
+// the queue-full rung: the conservation identity spans every counter, so
+// splitting one must not quietly drop a term from it.
+func floorShed(st Stats) uint64 { return st.ShedFloorProtected + st.ShedNothingReclaimable }
+
+func shedTotal(st Stats) uint64 { return st.ShedQueueFull + floorShed(st) }
+
 func mustNew(t *testing.T, opts Options) *Set {
 	t.Helper()
 	s, err := New(opts)

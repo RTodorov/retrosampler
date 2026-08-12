@@ -64,23 +64,59 @@ type Options struct {
 	dequeueHook func()
 }
 
-// Stats is a point-in-time snapshot of the Set's overload counters.
-// Every shed or refusal is counted (ADR-007 r5): these values back the
-// alarms once telemetry export lands.
+// eventKind tags a fragBuf's role in the shard queue: one bounded typed
+// queue carries both fragments and keep verdicts, so the handoff never
+// boxes an event into any (ADR-007 r2). Same-queue FIFO is also the
+// ordering guarantee — a batch's fragments enqueue ahead of its keep.
+type eventKind uint8
+
+const (
+	evFrag eventKind = iota
+	evKeep
+)
+
+// Origin says which side produced a keep.
+type Origin uint8
+
+// Keep origins: local detection publishes its verdict onward to the bus,
+// where a bus-received keep never re-publishes (ADR-008 r3).
+const (
+	OriginLocal Origin = iota
+	OriginBus
+)
+
+// atFloorCause values: why rung 2 is shedding this shard's ingest.
+const (
+	floorClear         uint32 = iota // not at the floor
+	floorProtected                   // next candidate holds floor-protected data
+	nothingReclaimable               // no finalized segment left to sacrifice
+)
+
+// Stats is a point-in-time snapshot of the Set's overload and decision
+// counters. Every shed or refusal is counted (ADR-007 r5): these values
+// back the alarms once telemetry export lands.
 type Stats struct {
-	ShedQueueFull        uint64
-	ShedFloor            uint64
-	AppendErrors         uint64
-	EarlyExpiredSegments uint64
+	ShedQueueFull          uint64
+	ShedFloorProtected     uint64
+	ShedNothingReclaimable uint64
+	AppendErrors           uint64
+	EarlyExpiredSegments   uint64
+	KeptLocal              uint64
+	KeptBus                uint64
+	DuplicateKeeps         uint64
 }
 
-// fragBuf is one recycled handoff buffer: a marshaled fragment and its
-// routing metadata, copied on Offer so the caller's memory is never
-// retained past the call.
+// fragBuf is one recycled handoff buffer: a queue event with its routing
+// metadata. A fragment's bytes are copied on Offer so the caller's memory
+// is never retained past the call; a keep carries no data.
 type fragBuf struct {
 	id   [16]byte
 	at   time.Time
 	data []byte
+
+	kind   eventKind
+	origin Origin
+	reason byte
 }
 
 // Set owns the shard workers and the ladder state shared across them.
@@ -92,10 +128,14 @@ type Set struct {
 	// shard on its expiry tick — off the per-span hot path (ADR-007 r2).
 	diskBytes atomic.Int64
 
-	shedQueueFull atomic.Uint64
-	shedFloor     atomic.Uint64
-	appendErrors  atomic.Uint64
-	earlyExpired  atomic.Uint64
+	shedQueueFull          atomic.Uint64
+	shedFloorProtected     atomic.Uint64
+	shedNothingReclaimable atomic.Uint64
+	appendErrors           atomic.Uint64
+	earlyExpired           atomic.Uint64
+	keptLocal              atomic.Uint64
+	keptBus                atomic.Uint64
+	duplicateKeeps         atomic.Uint64
 
 	intake   atomic.Bool
 	stopOnce sync.Once
@@ -170,6 +210,7 @@ func New(opts Options) (*Set, error) {
 		}
 		sh := &shard{
 			buf:  b,
+			dec:  newDecidedSet(),
 			work: make(chan *fragBuf, queueDepth),
 			free: make(chan *fragBuf, queueDepth),
 			stop: make(chan struct{}),
@@ -189,8 +230,9 @@ func New(opts Options) (*Set, error) {
 }
 
 // Offer routes one marshaled fragment to its shard, copying it into a
-// recycled buffer. It never blocks: with no free buffer the fragment is
-// shed and counted (ADR-007 r5 rung 3). After Shutdown it is a no-op.
+// recycled buffer, and reports whether it was accepted. It never blocks:
+// with no free buffer the fragment is shed and counted (ADR-007 r5 rung
+// 3). After Shutdown it is a no-op returning false.
 //
 // Conservation — every offered fragment is buffered or counted as shed —
 // is guaranteed only for Offers that complete before Shutdown begins. An
@@ -198,25 +240,82 @@ func New(opts Options) (*Set, error) {
 // drained and exited, and that fragment is then dropped uncounted; in
 // shadow mode the span still passes through the pipeline. Closing the
 // race is stage-3 work, landing with retention.
-func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) {
+func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) bool {
 	if !s.intake.Load() {
-		return
+		return false
 	}
 	sh := s.shards[shardFor(id, len(s.shards))]
-	// Rung 2: shard at window floor — shed until the tick clears the flag.
-	if sh.atFloor.Load() {
-		s.shedFloor.Add(1)
-		return
+	// Rung 2: shard at window floor — shed until the tick clears the cause.
+	switch sh.atFloorCause.Load() {
+	case floorProtected:
+		s.shedFloorProtected.Add(1)
+		return false
+	case nothingReclaimable:
+		s.shedNothingReclaimable.Add(1)
+		return false
 	}
 	select {
 	case fb := <-sh.free:
+		fb.kind = evFrag // recycled buffers carry the last event's kind
 		fb.id = id
 		fb.at = now
 		fb.data = append(fb.data[:0], frag...)
 		sh.work <- fb
+		return true
 	default:
 		s.shedQueueFull.Add(1)
+		return false
 	}
+}
+
+// Keep enqueues a locally detected keep verdict, non-blocking. False
+// means no free buffer — the caller treats it as batch refusal, and the
+// upstream retry re-detects, so no verdict is silently lost. The floor
+// never refuses keeps: a keep concerns data already buffered, not new
+// data volume (ADR-008 r4).
+func (s *Set) Keep(id [16]byte, reason byte, now time.Time) bool {
+	return s.enqueueKeep(id, OriginLocal, reason, now, nil, false)
+}
+
+// KeepFromBus enqueues a bus-received keep, blocking on a full free ring
+// until a buffer frees or abort closes: a broadcast keep must never be
+// silently shed. A nil abort blocks indefinitely.
+func (s *Set) KeepFromBus(id [16]byte, reason byte, now time.Time, abort <-chan struct{}) bool {
+	return s.enqueueKeep(id, OriginBus, reason, now, abort, true)
+}
+
+// enqueueKeep hands a keep verdict to id's shard, waiting for a free
+// buffer only when block is set.
+func (s *Set) enqueueKeep(id [16]byte, origin Origin, reason byte, now time.Time,
+	abort <-chan struct{}, block bool,
+) bool {
+	if !s.intake.Load() {
+		return false
+	}
+	sh := s.shards[shardFor(id, len(s.shards))]
+	var fb *fragBuf
+	if block {
+		select {
+		case fb = <-sh.free:
+		case <-abort:
+			return false
+		}
+	} else {
+		select {
+		case fb = <-sh.free:
+		default:
+			s.shedQueueFull.Add(1)
+			return false
+		}
+	}
+	fb.kind = evKeep
+	fb.id = id
+	fb.at = now
+	fb.origin = origin
+	fb.reason = reason
+	fb.data = fb.data[:0]
+	sh.work <- fb
+	return true
 }
 
 // Shutdown stops intake, signals every worker to drain and close its
@@ -253,14 +352,29 @@ func (s *Set) Shutdown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// Stats snapshots the overload counters.
+// Stats snapshots the overload and decision counters.
 func (s *Set) Stats() Stats {
 	return Stats{
-		ShedQueueFull:        s.shedQueueFull.Load(),
-		ShedFloor:            s.shedFloor.Load(),
-		AppendErrors:         s.appendErrors.Load(),
-		EarlyExpiredSegments: s.earlyExpired.Load(),
+		ShedQueueFull:          s.shedQueueFull.Load(),
+		ShedFloorProtected:     s.shedFloorProtected.Load(),
+		ShedNothingReclaimable: s.shedNothingReclaimable.Load(),
+		AppendErrors:           s.appendErrors.Load(),
+		EarlyExpiredSegments:   s.earlyExpired.Load(),
+		KeptLocal:              s.keptLocal.Load(),
+		KeptBus:                s.keptBus.Load(),
+		DuplicateKeeps:         s.duplicateKeeps.Load(),
 	}
+}
+
+// DecidedEntries reports the pending-keeps population across shards as of
+// the last ticks. Each worker owns its decided set outright, so the value
+// is a sum of per-shard mirrors published on tick, not a live count.
+func (s *Set) DecidedEntries() int64 {
+	var n int64
+	for _, sh := range s.shards {
+		n += sh.decidedLen.Load()
+	}
+	return n
 }
 
 // DiskBytesTotal returns the global on-disk total as of the last ticks.

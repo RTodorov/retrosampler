@@ -118,7 +118,9 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	// worker that misses its turn can cost a shard one ring slot, so the
 	// budget is 5% rather than 0; the hollow mode this guards against
 	// sheds most of the window.
-	shed := (after.ShedQueueFull - before.ShedQueueFull) + (after.ShedFloor - before.ShedFloor)
+	shed := (after.ShedQueueFull - before.ShedQueueFull) +
+		(after.ShedFloorProtected - before.ShedFloorProtected) +
+		(after.ShedNothingReclaimable - before.ShedNothingReclaimable)
 	assert.Less(t, shed, uint64(allocBatchTraces*(nRuns+1)/20),
 		"measurement must ride the copy+handoff path, not the queue-full shed")
 	// The race detector's forced drops miss ~25% of the time; a path that
