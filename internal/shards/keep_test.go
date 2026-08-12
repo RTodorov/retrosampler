@@ -6,6 +6,7 @@ package shards
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,6 +197,74 @@ func TestOfferStampsItsKindOverARecycledKeep(t *testing.T) {
 	require.NoError(t, s.Shutdown(context.Background()))
 	assert.Equal(t, uint64(1), collectAll(t, dir, opts, [][16]byte{id}),
 		"the fragment takes the append path, not the keep path")
+}
+
+// Every keep that reported true is acted on even when Shutdown races the
+// keeping goroutines. A true promises the event reached its shard
+// worker, and the worker charges every one it handles to exactly one
+// counter — a keep to KeptLocal, KeptBus or DuplicateKeeps, a retry to
+// FlushRetries — so each identity below must close once Shutdown has
+// returned and every worker is gone. Without the quiesce an event could
+// pass the intake check and send onto a worker that had already drained:
+// true returned, verdict dropped, and for a bus keep no upstream left to
+// re-detect it.
+//
+// The abort channel doubles as a watchdog. Both blocking entry points
+// wait on the free ring, so the quiesce must hold the workers up long
+// enough to refill it; if one ever waited past their exit, the timer
+// firing is the evidence.
+func TestKeepAndRetryVsShutdownConservation(t *testing.T) {
+	const goroutines, perG, nIDs = 8, 200, 32
+	for round := range 20 {
+		clk := newFakeClock(time.Unix(1000, 0))
+		s := mustNew(t, testOptions(t.TempDir(), clk))
+		for n := range uint64(nIDs) {
+			require.True(t, s.Offer(testID(n), []byte("frag"), clk.Now()))
+		}
+
+		wedged := make(chan struct{})
+		watchdog := time.AfterFunc(30*time.Second, func() { close(wedged) })
+		var keeps, retries atomic.Uint64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for g := range uint64(goroutines) {
+			wg.Add(1)
+			go func(g uint64) {
+				defer wg.Done()
+				<-start
+				for n := range uint64(perG) {
+					// Every entry point races: Keep sheds on a full ring,
+					// KeepFromBus and Retry block on one.
+					id := testID((g*perG + n) % nIDs)
+					switch n % 3 {
+					case 0:
+						if s.Keep(id, 1, clk.Now()) {
+							keeps.Add(1)
+						}
+					case 1:
+						if s.KeepFromBus(id, 1, clk.Now(), wedged) {
+							keeps.Add(1)
+						}
+					default:
+						if s.Retry(id, 1, NeedFlush, wedged) {
+							retries.Add(1)
+						}
+					}
+				}
+			}(g)
+		}
+		close(start)
+		time.Sleep(time.Duration(round) * 100 * time.Microsecond) // vary the race window
+		require.NoError(t, s.Shutdown(context.Background()))
+		wg.Wait()
+		require.True(t, watchdog.Stop(), "a blocking enqueue waited past the quiesce")
+
+		st := s.Stats()
+		require.Equal(t, keeps.Load(), st.KeptLocal+st.KeptBus+st.DuplicateKeeps,
+			"round %d: every accepted keep is acted on exactly once", round)
+		require.Equal(t, retries.Load(), st.FlushRetries,
+			"round %d: every accepted retry is acted on exactly once", round)
+	}
 }
 
 // After Shutdown the queues are gone; a keep must report refusal rather
