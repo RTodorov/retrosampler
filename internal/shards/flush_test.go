@@ -57,6 +57,8 @@ func TestFreshKeepProducesFlushJob(t *testing.T) {
 	require.True(t, s.KeepFromBus(id2, 1, clk.Now(), nil))
 	j2 := recvJob(t, flush)
 	assert.Equal(t, NeedFlush, j2.Need, "bus keeps never re-publish")
+	require.Len(t, j2.Frags, 1)
+	assert.Equal(t, "frag-c", string(j2.Frags[0]), "a bus keep collects on the same FIFO terms")
 }
 
 // A local keep whose fragments were refused still broadcasts: the job
@@ -149,6 +151,68 @@ func TestPendingIntentDrainsWhenFragmentsExpire(t *testing.T) {
 	}
 }
 
+// Parking MERGES need-bits rather than replacing them, and the tick
+// retries every parked intent, not just one.
+//
+// The merge is what keeps a broadcast alive: a local keep parks owing
+// publish+flush, and a later fragment for that now-decided trace parks
+// owing flush alone. Overwriting there would drop NeedPublish, so the
+// trace would flush locally and never reach the bus — peers would expire
+// their fragments of a trace this instance kept, and nothing would count
+// the loss. The reason follows the same rule from the other side: the
+// forward carries none (a fragment holds no verdict), so the keep's must
+// survive the merge.
+//
+// Two traces park in the one shard, so the tick's key-snapshot loop is
+// pinned as well: a loop that retried a single intent per tick would
+// leave the second parked forever.
+func TestParkedIntentsMergeNeedBits(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // occupy the only slot, so every handoff parks
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Shards = 1 // both traces land in the same pend map
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	merged, plain := testID(11), testID(12)
+	require.True(t, s.Offer(merged, []byte("before"), clk.Now()))
+	require.True(t, s.Keep(merged, 7, clk.Now())) // parks publish+flush
+	// Same trace, now decided: the forward parks flush-only on top.
+	require.True(t, s.Offer(merged, []byte("after"), clk.Now()))
+	require.True(t, s.Offer(plain, []byte("other"), clk.Now()))
+	require.True(t, s.Keep(plain, 9, clk.Now()))
+
+	// Every handoff buffer back in the ring means every event above has
+	// been handled — and with the channel full, parked. Waiting on
+	// PendingFlushes would not do: it counts traces, so it reaches 2
+	// before the second event for merged has necessarily landed.
+	sh := s.shards[0]
+	require.Eventually(t, func() bool { return len(sh.free) == queueDepth },
+		5*time.Second, time.Millisecond, "every event is handled and parked")
+
+	// One free slot, so the retries drain one per tick.
+	<-flush
+	jobs := make(map[[16]byte]*FlushJob, 2)
+	for range 2 {
+		j := recvJob(t, flush)
+		jobs[j.ID] = j
+	}
+	require.Contains(t, jobs, merged)
+	require.Contains(t, jobs, plain, "the tick retries every parked intent, not one")
+
+	assert.Equal(t, NeedPublish|NeedFlush, jobs[merged].Need,
+		"the forward's flush-only park must not drop the keep's publish")
+	assert.Equal(t, byte(7), jobs[merged].Reason, "first nonzero reason wins the merge")
+	assert.Len(t, jobs[merged].Frags, 2, "the retry re-collects the whole trace")
+	assert.Equal(t, NeedPublish|NeedFlush, jobs[plain].Need)
+
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
+		5*time.Second, time.Millisecond, "both intents drain")
+}
+
 // A full flush channel parks the intent per shard; the tick retries it
 // with the fragments still on disk (ADR-007: retries are free until
 // segment expiry).
@@ -172,6 +236,7 @@ func TestFullFlushChannelPendsAndTickRetries(t *testing.T) {
 	<-flush // unblock
 	j := recvJob(t, flush)
 	assert.Equal(t, id, j.ID)
+	assert.Equal(t, NeedPublish|NeedFlush, j.Need, "parking preserves what the job owed")
 	require.Len(t, j.Frags, 1)
 	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
 		5*time.Second, time.Millisecond)
