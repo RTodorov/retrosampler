@@ -96,7 +96,10 @@ func TestOfferZeroAllocs(t *testing.T) {
 // worker answers one from the decided set's table alone — no job, no
 // Collect, no fragment copies — so unlike the fresh keep below there is
 // nothing here that ADR-004 exempts, and the whole path is gated rather
-// than only the producer's half.
+// than only the producer's half. Every trace in the fixture holds
+// fragments on disk, which is what makes that a claim and not a
+// tautology: the worker must answer from the table even when there IS
+// data it could have collected.
 //
 // The measured window therefore has to CONTAIN the worker's half rather
 // than exclude it: each run spins on the duplicate counter until the
@@ -106,10 +109,21 @@ func TestOfferZeroAllocs(t *testing.T) {
 func TestKeepZeroAllocs(t *testing.T) {
 	const nIDs, nRuns = 64, 100
 	const reason = 1
+	// fragsPerTrace is what every trace here holds on disk before any
+	// verdict — a trace whose spans arrived in a few batches, which is the
+	// case a keep actually meets.
+	const fragsPerTrace = 3
 
 	clk := newFakeClock(time.Unix(1000, 0))
 	opts := testOptions(t.TempDir(), clk)
 	opts.SegmentSize = 1 << 30 // no roll during measurement
+	// A flusher that keeps up, without a goroutine to drain it: the channel
+	// holds every job this test can produce, so sendJob takes its
+	// non-blocking send. A nil or full channel would park each job in the
+	// shard's pending map instead — a different path, and one that would
+	// quietly replace the flush cost measured below with the cost of
+	// deferring it.
+	opts.Flush = make(chan *FlushJob, 2*(nIDs+nRuns+1))
 	s := mustNew(t, opts)
 	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
 
@@ -117,10 +131,42 @@ func TestKeepZeroAllocs(t *testing.T) {
 	for n := range uint64(nIDs) {
 		ids[n] = testID(n)
 	}
+	// AllocsPerRun makes one unmeasured warm-up call on top of nRuns, so
+	// the fresh set needs one id more than it measures.
+	freshIDs := make([][16]byte, nRuns+1)
+	for n := range uint64(len(freshIDs)) {
+		freshIDs[n] = testID(nIDs + n)
+	}
 	now := clk.Now()
-	// Decide every id once, so every keep the measurement makes is a
-	// duplicate. The window is a frozen hour and the tick an hour away, so
-	// nothing evicts an entry back to fresh underneath the measurement.
+	frag := bytes.Repeat([]byte{0xAB}, 512)
+	// buffer offers one trace's fragments, waiting out a full ring rather
+	// than failing on it: this producer outruns the workers by an order of
+	// magnitude, so a shed here means the ring needs a moment, not that the
+	// path is broken. Every fragment has to land — both measurements below
+	// are about what a verdict does with data that is already on disk.
+	buffer := func(id [16]byte) {
+		t.Helper()
+		for range fragsPerTrace {
+			accepted := false
+			for attempt := 0; attempt < 1<<20 && !accepted; attempt++ {
+				if accepted = s.Offer(id, frag, now); !accepted {
+					runtime.Gosched()
+				}
+			}
+			require.True(t, accepted, "shard never freed a buffer for the fixture")
+		}
+	}
+	for _, id := range ids {
+		buffer(id)
+	}
+	for _, id := range freshIDs {
+		buffer(id)
+	}
+
+	// Decide every id of the first set once, so every keep the measurement
+	// makes is a duplicate. The window is a frozen hour and the tick an
+	// hour away, so nothing evicts an entry back to fresh underneath the
+	// measurement.
 	for _, id := range ids {
 		require.True(t, s.Keep(id, reason, now))
 	}
@@ -162,21 +208,38 @@ func TestKeepZeroAllocs(t *testing.T) {
 	assert.Equal(t, shedTotal(before), shedTotal(after),
 		"measurement must ride the enqueue, not a shed early return")
 
-	// The fresh keep is informational, never a gate: it collects the
-	// trace's buffered fragments and builds a flush job, and ADR-004
-	// exempts the flush path from the zero-alloc rule. Recorded so the
-	// exempt cost is visible next to the gated one rather than unmeasured.
-	fresh := uint64(0)
+	// The fresh keep is informational, never a gate: marking a new verdict
+	// sends the worker to collect the trace's buffered fragments and build
+	// a flush job, and ADR-004 exempts the flush path from the zero-alloc
+	// rule. It is measured the same way as the duplicate — spinning until
+	// the worker has answered — so the flush-side allocations are inside
+	// the window, which is exactly what makes the figure worth recording:
+	// AllocsPerRun reads process-wide MemStats, so they count wherever
+	// they happen.
+	//
+	// The fixture is what makes it a true cost. Each of these traces has
+	// fragsPerTrace fragments on disk and a flush channel with room, so
+	// the number covers one job, a Frags slice grown to fragsPerTrace, and
+	// a copy per fragment. Against an unbuffered fixture the same code
+	// collects nothing and reports ~1 alloc — a job built over an empty
+	// trace, which is not a cost anything in production pays.
+	//
+	// Recorded rather than asserted so an optimisation of the flush path
+	// cannot fail the suite.
+	k, freshRefused := 0, 0
 	freshAvg := testing.AllocsPerRun(nRuns, func() {
 		want := s.Stats().KeptLocal + 1
-		if !s.Keep(testID(nIDs+fresh), reason, now) {
-			fresh++
+		if !s.Keep(freshIDs[k], reason, now) {
+			freshRefused++
+			k++
 			return
 		}
 		for s.Stats().KeptLocal < want {
 			runtime.Gosched()
 		}
-		fresh++
+		k++
 	})
-	t.Logf("fresh keep (ungated, ADR-004 flush-path exemption): %v allocs/op", freshAvg)
+	assert.Zero(t, freshRefused, "a refused keep would leave its run unmeasured")
+	t.Logf("fresh keep over %d buffered fragments (ungated, ADR-004 flush-path "+
+		"exemption): %v allocs/op", fragsPerTrace, freshAvg)
 }
