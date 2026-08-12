@@ -129,33 +129,61 @@ func TestWatermarkEarlyExpiryShrinksEffectiveWindow(t *testing.T) {
 		"the gauge shows the window the watermark actually left standing")
 }
 
+// idsForShard returns count distinct trace IDs that all route to shard i
+// of n, so a test can load one shard while starving another.
+func idsForShard(i, n, count int) [][16]byte {
+	ids := make([][16]byte, 0, count)
+	for seq := uint64(0); len(ids) < count; seq++ {
+		if id := testID(seq); shardFor(id, n) == i {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// Rung 2 sheds for two different reasons and the counters must tell them
+// apart: the next sacrifice candidate is floor-protected, or there is no
+// finalized segment to sacrifice at all. One over-watermark Set shows
+// both at once, since the ladder's disk total is global while the
+// candidates are per shard — the loaded shard holds protected data, the
+// idle shard holds nothing reclaimable.
 func TestFloorProtectedDataMakesOfferShed(t *testing.T) {
 	dir := t.TempDir()
 	clk := newFakeClock(time.Unix(10000, 0))
 	opts := testOptions(dir, clk)
-	opts.Shards = 1
+	opts.Shards = 2
 	opts.Window = time.Hour
 	opts.SegmentSize = 4096
-	// 16 KiB budget: the 8 KiB watermark clears the 4 KiB active-segment
-	// floor, and the ~16 KiB offered below goes straight over it.
-	opts.DiskBudget = 16 << 10
+	// 32 KiB budget: the 16 KiB watermark clears the two shards' 8 KiB
+	// active-segment floor, and the ~32 KiB loaded below goes over it.
+	opts.DiskBudget = 32 << 10
 	opts.WatermarkPct = 50
 	opts.WindowFloor = 45 * time.Minute // 30-minute-old data is floor-protected
 	opts.Tick = 10 * time.Millisecond
 	s := mustNew(t, opts)
 	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
 
+	loaded := idsForShard(0, opts.Shards, 32)
+	idle := idsForShard(1, opts.Shards, 1)[0]
+
 	old := clk.Now().Add(-30 * time.Minute)
 	frag := make([]byte, 1024)
-	for n := range uint64(16) { // ~16 KiB: over the 4 KiB limit
-		s.Offer(testID(n), frag, old)
+	for _, id := range loaded { // ~32 KiB: over the 16 KiB limit
+		s.Offer(id, frag, old)
 	}
 
 	require.Eventually(t, func() bool {
-		s.Offer(testID(999), frag, clk.Now())
-		return s.Stats().ShedFloor > 0
+		s.Offer(loaded[0], frag, clk.Now())
+		return s.Stats().ShedFloorProtected > 0
 	}, time.Second, 5*time.Millisecond,
 		"over watermark with floor-protected candidates: ingest sheds, counted")
+	// One byte at a time: the idle shard must stay short of a segment
+	// roll, or it acquires a finalized segment and changes cause.
+	require.Eventually(t, func() bool {
+		s.Offer(idle, []byte("x"), clk.Now())
+		return s.Stats().ShedNothingReclaimable > 0
+	}, time.Second, 5*time.Millisecond,
+		"over watermark with no finalized segment: the shed reports its own cause")
 	assert.Zero(t, s.Stats().EarlyExpiredSegments,
 		"floor-protected segments are never sacrificed")
 }

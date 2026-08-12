@@ -81,6 +81,6 @@ func TestOfferZeroAllocs(t *testing.T) {
 	assert.Zero(t, after.AppendErrors, "every handed-off fragment must land")
 	assert.Equal(t, before.ShedQueueFull, after.ShedQueueFull,
 		"measurement must ride the copy+handoff path, not the queue-full shed")
-	assert.Equal(t, before.ShedFloor, after.ShedFloor,
+	assert.Equal(t, floorShed(before), floorShed(after),
 		"measurement must ride the copy+handoff path, not the floor shed")
 }
