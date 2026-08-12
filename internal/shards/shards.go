@@ -44,7 +44,8 @@ type Options struct {
 	// SegmentSize is the per-shard segment roll threshold in bytes.
 	SegmentSize int
 	// DiskBudget is the byte budget across all shards; the watermark
-	// rung acts on it (ADR-007 r5).
+	// rung acts on it (ADR-007 r5). Its watermark must exceed the
+	// unreclaimable Shards*SegmentSize active-segment floor.
 	DiskBudget int64
 	// WatermarkPct is the DiskBudget percentage above which shards
 	// early-expire their oldest segments. Must be in (0, 100].
@@ -136,6 +137,17 @@ func New(opts Options) (*Set, error) {
 		return nil, errors.New("shards: Options.WindowFloor must be in (0, Window)")
 	case opts.Now == nil:
 		return nil, errors.New("shards: Options.Now is required")
+	}
+	// ExpireOldest reclaims only finalized segments, so the Shards active
+	// segments are permanently unreclaimable. With the watermark at or
+	// under that floor every tick sets atFloor and Offer sheds 100% of
+	// ingest, forever and silently: refuse at startup instead (ADR-007 r5).
+	watermark := opts.DiskBudget / 100 * int64(opts.WatermarkPct) // the tick's own expression
+	if floor := int64(opts.Shards) * int64(opts.SegmentSize); watermark <= floor {
+		return nil, fmt.Errorf("shards: watermark (%d bytes, DiskBudget %d at %d%%) does not clear "+
+			"the unreclaimable active-segment floor (Shards %d x SegmentSize %d = %d bytes): "+
+			"every tick would shed all ingest; raise disk_budget or lower shards/segment_size",
+			watermark, opts.DiskBudget, opts.WatermarkPct, opts.Shards, opts.SegmentSize, floor)
 	}
 	if opts.Tick <= 0 {
 		opts.Tick = defaultTick

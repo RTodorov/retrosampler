@@ -8,6 +8,9 @@ processors:
   retrosampler:
     storage_dir: /tmp/retrosampler-buffer
     disk_budget: 2147483648
+    # Pinned: the shard count defaults to GOMAXPROCS, and shards x
+    # segment_size must stay under the disk_budget watermark.
+    shards: 4
 
 exporters:
   file:

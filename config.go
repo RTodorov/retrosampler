@@ -23,6 +23,13 @@ type Config struct {
 	// DiskBudget is the total buffer disk budget in bytes across all
 	// shards (ADR-006); the overload ladder acts on it (ADR-007 r5).
 	// Required whenever storage_dir is set.
+	//
+	// It is a target, soft in two directions. Above: only finalized
+	// segments are reclaimable, so the shards x segment_size bytes held
+	// by the active segments are a permanent floor — a budget whose
+	// watermark does not clear it is rejected at startup. Below: usage
+	// is sampled on each shard's tick, not on every roll, so the figure
+	// the ladder acts on lags reality by up to one tick (~1s) per shard.
 	DiskBudget int64 `mapstructure:"disk_budget"`
 	// WatermarkPct is the disk-budget percentage above which shards
 	// early-expire their oldest segments (ADR-007 r5).

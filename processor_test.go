@@ -20,6 +20,11 @@ import (
 	"github.com/rtodorov/retrosampler/internal/metadata"
 )
 
+// testDiskBudget clears the shards.New watermark-vs-active-segment-floor
+// check (Shards x SegmentSize, with Shards = GOMAXPROCS here) on any core
+// count these tests run on. Nothing preallocates it.
+const testDiskBudget = 1 << 34
+
 func TestShadowDisabledWithoutStorageDir(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
@@ -36,7 +41,7 @@ func TestShadowBuffersAndPassesThrough(t *testing.T) {
 	dir := t.TempDir()
 	cfg := createDefaultConfig().(*Config)
 	cfg.StorageDir = dir
-	cfg.DiskBudget = 1 << 30
+	cfg.DiskBudget = testDiskBudget
 	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	td := ptrace.NewTraces()
@@ -73,7 +78,7 @@ func TestShadowShutdownStopsWorkers(t *testing.T) {
 	// goleak (TestMain) is the real assertion; this exercises the path.
 	cfg := createDefaultConfig().(*Config)
 	cfg.StorageDir = t.TempDir()
-	cfg.DiskBudget = 1 << 30
+	cfg.DiskBudget = testDiskBudget
 	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	require.NoError(t, p.shutdown(context.Background()))
@@ -82,7 +87,7 @@ func TestShadowShutdownStopsWorkers(t *testing.T) {
 func TestShadowShutdownTwiceIsSafeAndPostShutdownPassesThrough(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.StorageDir = t.TempDir()
-	cfg.DiskBudget = 1 << 30
+	cfg.DiskBudget = testDiskBudget
 	p := newShadowProcessor(cfg, zap.NewNop(), systemClock)
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 
@@ -100,7 +105,7 @@ func TestFactoryLifecycleWithStorage(t *testing.T) {
 	f := NewFactory()
 	cfg := f.CreateDefaultConfig().(*Config)
 	cfg.StorageDir = t.TempDir()
-	cfg.DiskBudget = 1 << 30
+	cfg.DiskBudget = testDiskBudget
 	sink := new(consumertest.TracesSink)
 	proc, err := f.CreateTraces(context.Background(),
 		processortest.NewNopSettings(metadata.Type), cfg, sink)
