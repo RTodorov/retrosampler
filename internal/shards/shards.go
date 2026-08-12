@@ -153,9 +153,12 @@ type Set struct {
 	expiredBytes           atomic.Int64
 
 	intake atomic.Bool
-	// inflight counts enqueues that have passed the intake check and are
-	// still mid-send. Shutdown waits it out before stopping the workers,
-	// so an accepted event can never land on a drained queue.
+	// inflight counts enqueues that are mid-send. Every entry point takes
+	// its token BEFORE the intake check, so a Shutdown that has already
+	// stored intake-off still sees the token of one that read intake as
+	// on; the reverse order leaves a window where Shutdown reads zero and
+	// stops the workers under a send that is still coming. Shutdown waits
+	// the count out, so an accepted event never lands on a drained queue.
 	inflight atomic.Int64
 	stopOnce sync.Once
 }
@@ -259,8 +262,6 @@ func New(opts Options) (*Set, error) {
 // call holds keeps the workers alive until its send has landed in a
 // queue (see Shutdown).
 func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) bool {
-	// Increment before the check, so a Shutdown that has already stored
-	// intake-off sees the token of an Offer that read intake as still on.
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	if !s.intake.Load() {
@@ -380,11 +381,20 @@ func (s *Set) enqueueKeep(id [16]byte, origin Origin, reason byte, now time.Time
 // That quiesce is what makes the drain conserving: an accepted enqueue
 // holds an in-flight token across its whole send, so nothing it accepted
 // can land on a queue whose worker has already drained. The blocking
-// sends (KeepFromBus, Retry) hold their token while they wait, and the
-// workers are still running through the quiesce, so an exhausted free
-// ring refills and the send completes. One waiting on a ring nothing
-// will refill is bounded by ctx: the quiesce loop returns ctx.Err(), and
-// the Shutdown can be retried.
+// sends (KeepFromBus, Retry) hold their token while they wait for a
+// buffer, and the workers run on through the quiesce, so an exhausted
+// free ring refills and the send completes.
+//
+// ctx bounds how long Shutdown waits, never how long a sender blocks: one
+// waiting on a ring nothing will refill — its worker wedged — is released
+// only by the abort channel it was given. Until then Shutdown cannot
+// finish, and it deliberately leaves stop unsignalled rather than let the
+// workers drain out from under an accepted send, which is the very drop
+// the quiesce exists to prevent; the workers stay live with their buffers
+// open. Intake is already off, so the blockage can only clear, never
+// grow, and a retry gets past the quiesce once that sender lands or
+// aborts. A caller needing shutdown to finish regardless must close the
+// abort channel it gave the sender, then retry.
 func (s *Set) Shutdown(ctx context.Context) error {
 	s.intake.Store(false)
 	for s.inflight.Load() != 0 {
