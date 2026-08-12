@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -265,6 +266,70 @@ func TestRefusedFragmentReportsOverload(t *testing.T) {
 	require.ErrorIs(t, err, errOverloaded)
 	assert.False(t, consumererror.IsPermanent(err),
 		"overload is the receiver's to retry, not a permanent drop")
+}
+
+// A shed fragment must not suppress the keep VERDICT. The shard layer
+// deliberately does not floor-gate Keep (ADR-008 r4): a verdict concerns
+// data already buffered, not new volume. If an ingest refusal swallowed
+// the verdict with it, an error trace whose fragments are already on
+// disk would go unflushed for as long as the shed lasts — and the
+// shards' zero-fragment publish-only job (TestZeroFragmentLocalKeep-
+// StillPublishes) would be unreachable from production, since that path
+// exists precisely for a keep whose fragments were refused.
+func TestShedFragmentStillLandsTheKeepVerdict(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.Shards = 1
+	cfg.SegmentSize = 1 << 20
+	// The ~1.6 MiB watermark clears the single shard's 1 MiB
+	// active-segment floor, and the load below goes over it. Everything
+	// written here is inside window_floor, so nothing is reclaimable and
+	// the shard parks at rung 2 rather than early-expiring.
+	cfg.DiskBudget = 2 << 20
+	sink := new(consumertest.TracesSink)
+	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p.next = sink
+	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(context.Background())) }()
+
+	ctx := context.Background()
+	victim := pcommon.TraceID{0xE7}
+	early := ptrace.NewTraces()
+	sp := early.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	sp.SetTraceID(victim)
+	sp.SetName("buffered-early")
+	_, err := p.processTraces(ctx, early)
+	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData,
+		"the victim's fragment is buffered while the shard is still healthy")
+
+	// One fragment per call, well inside the free ring, so the refusal
+	// this waits for is the floor rung and not queue exhaustion.
+	filler := strings.Repeat("x", 128<<10)
+	n := 0
+	require.Eventually(t, func() bool {
+		n++
+		td := ptrace.NewTraces()
+		f := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+		f.SetTraceID(pcommon.TraceID{0xF0, byte(n), byte(n >> 8)})
+		f.SetName(filler)
+		_, ferr := p.processTraces(ctx, td)
+		return errors.Is(ferr, errOverloaded)
+	}, 30*time.Second, 50*time.Millisecond,
+		"the shard fills past its watermark and rung 2 engages")
+	st := p.set.Load().Stats()
+	require.Zero(t, st.ShedQueueFull, "the shed under test is the floor, not ring exhaustion")
+	require.Positive(t, st.ShedFloorProtected+st.ShedNothingReclaimable)
+
+	// The headline case, mid-shed: this batch's span is refused, but the
+	// verdict it carries must still reach the shard.
+	_, err = p.processTraces(ctx, errorSpanBatch(victim, "shed-error-span"))
+	require.ErrorIs(t, err, errOverloaded, "a refused fragment still fails the whole batch")
+	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+		10*time.Second, time.Millisecond,
+		"the verdict lands despite the shed, so the already-buffered fragment flushes")
+	assert.Equal(t, []string{"buffered-early"}, spanNames(sink),
+		"the shed span never reached disk; what flushes is what was buffered before it")
+	assert.Equal(t, uint64(1), p.set.Load().Stats().KeptLocal)
 }
 
 // Concurrent ingest during shutdown: no panic, no goroutine leak (the

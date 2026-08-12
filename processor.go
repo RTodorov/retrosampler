@@ -71,8 +71,13 @@ func (p *retroProcessor) newPooledFrag() *pooledFrag {
 	pf.fn = func(id pcommon.TraceID, frag []byte, keep bool) {
 		if !pf.set.Offer(id, frag, pf.now) {
 			pf.refused = true
-			return
 		}
+		// The verdict is attempted even when the payload just shed. A
+		// shed is about new volume; the verdict is about the trace, whose
+		// earlier fragments are already on disk and whose peers are
+		// waiting on the broadcast — which is why the shard layer does
+		// not floor-gate Keep (ADR-008 r4). Dropping it here would leave
+		// an error trace undecided for as long as the shed lasts.
 		if keep && !pf.set.Keep(id, bus.ReasonError, pf.now) {
 			// A lost verdict with accepted fragments would silently
 			// un-decide an error trace: refuse the batch instead.
