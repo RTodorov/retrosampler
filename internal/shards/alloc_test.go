@@ -6,6 +6,7 @@ package shards
 import (
 	"bytes"
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -83,4 +84,99 @@ func TestOfferZeroAllocs(t *testing.T) {
 		"measurement must ride the copy+handoff path, not the queue-full shed")
 	assert.Equal(t, floorShed(before), floorShed(after),
 		"measurement must ride the copy+handoff path, not the floor shed")
+}
+
+// TestKeepZeroAllocs gates the keep path end to end (ADR-004 r2) for the
+// delivery that repeats: a DUPLICATE verdict — local re-detection on the
+// upstream retry, a bus echo, or this instance's own broadcast coming
+// back. Every one of those costs an enqueue and a worker dequeue, and
+// under a bus fanning out to N instances they outnumber first verdicts.
+//
+// Duplicates are the case that can be flat zero on both sides. The
+// worker answers one from the decided set's table alone — no job, no
+// Collect, no fragment copies — so unlike the fresh keep below there is
+// nothing here that ADR-004 exempts, and the whole path is gated rather
+// than only the producer's half.
+//
+// The measured window therefore has to CONTAIN the worker's half rather
+// than exclude it: each run spins on the duplicate counter until the
+// worker has answered, so its dequeue, its lookup and its buffer recycle
+// are all inside the number. AllocsPerRun pins GOMAXPROCS to 1, so the
+// yield is what lets the worker run at all.
+func TestKeepZeroAllocs(t *testing.T) {
+	const nIDs, nRuns = 64, 100
+	const reason = 1
+
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.SegmentSize = 1 << 30 // no roll during measurement
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	ids := make([][16]byte, nIDs)
+	for n := range uint64(nIDs) {
+		ids[n] = testID(n)
+	}
+	now := clk.Now()
+	// Decide every id once, so every keep the measurement makes is a
+	// duplicate. The window is a frozen hour and the tick an hour away, so
+	// nothing evicts an entry back to fresh underneath the measurement.
+	for _, id := range ids {
+		require.True(t, s.Keep(id, reason, now))
+	}
+	require.Eventually(t, func() bool { return s.Stats().KeptLocal == nIDs },
+		30*time.Second, time.Millisecond, "every id must be decided before the measurement")
+	require.Eventually(t, func() bool {
+		for _, sh := range s.shards {
+			if len(sh.free) < queueDepth {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, time.Millisecond,
+		"workers must recycle every handoff buffer before the measurement")
+
+	before := s.Stats()
+	i, refused := 0, 0
+	avg := testing.AllocsPerRun(nRuns, func() {
+		want := s.Stats().DuplicateKeeps + 1
+		if !s.Keep(ids[i%nIDs], reason, now) {
+			refused++
+			i++
+			return
+		}
+		for s.Stats().DuplicateKeeps < want {
+			runtime.Gosched()
+		}
+		i++
+	})
+	after := s.Stats()
+
+	assert.Zero(t, avg, "ADR-004 r2: 0 allocs on a duplicate keep, enqueue through worker dedup")
+	assert.Zero(t, refused, "a refused keep would leave its run unmeasured")
+	assert.Equal(t, before.KeptLocal, after.KeptLocal,
+		"every measured keep must be a duplicate: a fresh mark builds a flush job, "+
+			"which allocates by design")
+	assert.Equal(t, before.DuplicateKeeps+nRuns+1, after.DuplicateKeeps,
+		"AllocsPerRun adds one warm-up call, and every call must have reached a worker")
+	assert.Equal(t, shedTotal(before), shedTotal(after),
+		"measurement must ride the enqueue, not a shed early return")
+
+	// The fresh keep is informational, never a gate: it collects the
+	// trace's buffered fragments and builds a flush job, and ADR-004
+	// exempts the flush path from the zero-alloc rule. Recorded so the
+	// exempt cost is visible next to the gated one rather than unmeasured.
+	fresh := uint64(0)
+	freshAvg := testing.AllocsPerRun(nRuns, func() {
+		want := s.Stats().KeptLocal + 1
+		if !s.Keep(testID(nIDs+fresh), reason, now) {
+			fresh++
+			return
+		}
+		for s.Stats().KeptLocal < want {
+			runtime.Gosched()
+		}
+		fresh++
+	})
+	t.Logf("fresh keep (ungated, ADR-004 flush-path exemption): %v allocs/op", freshAvg)
 }
