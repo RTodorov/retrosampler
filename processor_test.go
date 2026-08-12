@@ -431,6 +431,48 @@ func TestShutdownStopsFlusherBeforeShards(t *testing.T) {
 	assert.Nil(t, p.set.Load())
 }
 
+// TestStaticCensusAlive is the root half of the positive goroutine
+// census (ADR-007 r7). goleak proves every goroutine is gone after
+// shutdown; nothing proved the two the processor starts are alive and
+// answering WHILE it runs, and both fail silently. A flusher that never
+// started leaves the shards parking jobs forever with no error anywhere;
+// a subscription that never took leaves this instance deaf to every
+// other instance's verdicts, which on a single-instance loopback still
+// looks entirely healthy.
+//
+// Counting goroutines would prove neither, so each is censused by the
+// effect only a live one can produce. The shard workers' own census is
+// structural and lives in internal/shards, where the shard set is
+// reachable.
+func TestStaticCensusAlive(t *testing.T) {
+	lb := bus.NewLoopback()
+	sink := new(consumertest.TracesSink)
+	p, _ := startTestProcessor(t, sink, lb)
+	ctx := context.Background()
+
+	_, err := p.processTraces(ctx, errorSpanBatch(pcommon.TraceID{0xC1}, "flusher-alive"))
+	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
+	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+		5*time.Second, time.Millisecond,
+		"the flusher goroutine must be draining the job channel")
+
+	// The subscriber: a healthy trace nothing local would ever keep, then
+	// a verdict arriving over the bus. Only a live subscription turns the
+	// second into a flush of the first.
+	deaf := pcommon.TraceID{0xC2}
+	td := ptrace.NewTraces()
+	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	sp.SetTraceID(deaf)
+	sp.SetName("subscriber-alive")
+	_, err = p.processTraces(ctx, td)
+	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
+	require.NoError(t, lb.Publish(ctx, deaf, bus.ReasonError))
+	require.Eventually(t, func() bool { return sink.SpanCount() == 2 },
+		5*time.Second, time.Millisecond,
+		"the bus subscription must be live and routing keeps into the shards")
+	assert.Equal(t, []string{"flusher-alive", "subscriber-alive"}, spanNames(sink))
+}
+
 // A timed-out shutdown leaves the processor retryable: the set pointer is
 // restored on error, so the retry actually shuts down instead of falsely
 // succeeding against a nil set while the workers keep running.
