@@ -51,7 +51,14 @@ func createTraces(ctx context.Context, set processor.Settings,
 	if err := p.bindTelemetry(set.TelemetrySettings); err != nil {
 		return nil, err
 	}
-	return processorhelper.NewTraces(ctx, set, cfg, next, p.processTraces,
+	tp, err := processorhelper.NewTraces(ctx, set, cfg, next, p.processTraces,
 		processorhelper.WithStart(p.start),
 		processorhelper.WithShutdown(p.shutdown))
+	if err != nil {
+		// No component was returned, so nothing will ever call shutdown
+		// to release the callbacks bound just above.
+		p.unbindTelemetry()
+		return nil, err
+	}
+	return tp, nil
 }
