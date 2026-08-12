@@ -31,26 +31,21 @@ fi
 # cannot inherit "time" from the table above it.
 # scripts/bench_gate_selftest.sh holds this parsing to both directions.
 #
-# gated is the size of ADR-004 r5's gated set (BenchmarkIngest, KeepFlush,
-# Expiry): that many benchmarks must actually pair, or benchmarks have gone
-# missing from the run and their regressions with them. Baseline rows with no
-# counterpart by design - BenchmarkOffer and BenchmarkDecode are committed as
-# reference data, not gated - simply do not count toward it.
+# gated is the size of ADR-004 r5's gated set - Ingest, KeepFlush, Expiry,
+# Offer, Decode (Offer and Decode joined per ADR-009's amendment). That many
+# benchmarks must actually pair, or benchmarks have gone missing from the run
+# and their regressions with them. Baseline rows with no counterpart by design
+# simply do not count toward it: a baseline outlives the run that recorded it.
 #
 # Moving the set takes TWO edits, and this number is the harmless one. What
-# decides whether a benchmark runs at all is the -bench regex in the
-# Makefile's bench target, which is harness-protected (ADR-001 r3): raise
-# this number without widening that regex and the gate fails every run with
-# "N of M gated benchmarks paired". Offer and Decode are ready to join - Offer
-# now measures accepted ingest rather than the shed early return it used to
-# (0.87-0.97 sheds/op), and both carry committed baseline rows - pending that
-# regex and the ADR-009 ruling that moves the set.
-#
-# Note the floor is a MINIMUM, not a filter: every benchmark that pairs is
-# checked for regressions whether or not it is counted here. So widening the
-# Makefile regex alone already gates Offer and Decode; this number only says
-# how many must not go missing.
-gated=3
+# decides whether a benchmark runs at all is the -bench regex in the Makefile's
+# bench target, which is harness-protected (ADR-001 r3). Raise this number
+# without widening that regex and the gate fails every run with "N of M gated
+# benchmarks paired"; widen the regex without raising this number and the new
+# benchmarks ARE gated for regressions but may vanish from the run unnoticed.
+# The floor is a minimum, not a filter - every benchmark that pairs is checked
+# either way - so this number says only which ones must not go missing.
+gated=5
 paired=$(benchstat -format csv "$base" bench-new.txt | awk -F, -v gated="$gated" '
   $1 == "" {
     metric = ""
