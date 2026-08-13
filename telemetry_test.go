@@ -207,15 +207,19 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 // error keep from a baseline keep cannot tell a broken service from a
 // sampling rate.
 //
-// Two semantics the instrument descriptions do not carry:
+// Two semantics the instrument descriptions do not carry, both visible
+// in the numbers below:
 //
 //   - detected.keeps counts RAW verdict production, before the decided
-//     set dedups. A baseline-selected trace that also trips a reason
-//     counts under BOTH, so the sum over reasons leads kept.local rather
-//     than matching it.
+//     set dedups. Baseline runs per trace regardless of what else fired,
+//     so all three traces here count under reason=baseline AND two of
+//     them count again under error and policy: the rows sum to 5 over
+//     3 kept traces. The sum over reasons leads kept.local; it does not
+//     match it.
 //   - duplicate.keeps at steady state is dominated by benign baseline
 //     re-enqueues: every batch of an already-decided baseline trace
-//     re-offers the verdict, and the decided set absorbs it.
+//     re-offers the verdict, and the decided set absorbs it. One batch
+//     per trace here, so none of that shows up.
 //
 // Every counter here moves inside ConsumeTraces — detection runs at
 // ingest — so the collection needs no settling.
@@ -229,6 +233,10 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 	// has to be on for a negative duration to reach it. The threshold
 	// itself is out of reach of every span below.
 	cfg.SpanLatencyThreshold = time.Hour
+	// Rate 1 makes the deterministic baseline fire on every trace, which
+	// is what puts a reason=baseline row on the wire without depending on
+	// which trace ids fall under a fractional threshold.
+	cfg.BaselineRate = 1
 	cfg.Policies = []PolicyConfig{
 		// Int() over a map-valued attribute errs at EVAL time, which is
 		// the ignore-and-count path; a non-numeric string would be a
@@ -256,7 +264,7 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 	assert.Equal(t, wantInstruments, reportedInstruments(t, tt),
 		"every declared instrument must be bound to a callback")
 
-	// Exact rows, so these also pin what is NOT reported: the four
+	// Exact rows, so these also pin what is NOT reported: the three
 	// reasons nobody reached and the policy that only ever errored are
 	// absent, not zero. A permanent zero series is cardinality that
 	// tells an operator nothing.
@@ -266,6 +274,7 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 		[]metricdata.DataPoint[int64]{
 			{Attributes: reason("error"), Value: 1},
 			{Attributes: reason("policy"), Value: 1},
+			{Attributes: reason("baseline"), Value: 3},
 		}, metricdatatest.IgnoreTimestamp())
 	metadatatest.AssertEqualProcessorRetrosamplerPolicyMatches(t, tt,
 		[]metricdata.DataPoint[int64]{{Attributes: policy("tagged"), Value: 1}},
@@ -280,6 +289,41 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 		"no baggage condition is configured, so nothing was parsed")
 	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"baggage.divergence_ms"),
 		"divergence needs both baggage keys and reports its zero until then")
+}
+
+// Three of the six reason labels are unreachable from any scenario a
+// telemetry test would drive cheaply, and the label strings are not
+// generated from anything — a typo, or a row pairing the wrong constant
+// with the right label, would ship silently and only ever show up on
+// someone's dashboard. This pins all six pairings and the shape of the
+// table: one row per byte in 1..bus.ReasonBaseline, no gap, no
+// duplicate, so a reason added without a row fails here.
+//
+// What it cannot catch is a new constant added ABOVE ReasonBaseline:
+// that same change silently breaks detect's nReasons array sizing, and
+// "baseline is the highest reason" is documented in the bus package
+// rather than pinned anywhere.
+func TestDetReasonsPinsEveryLabel(t *testing.T) {
+	want := map[byte]string{
+		bus.ReasonError:        "error",
+		bus.ReasonSpanLatency:  "span_latency",
+		bus.ReasonTraceLatency: "trace_latency",
+		bus.ReasonTraceAge:     "trace_age",
+		bus.ReasonPolicy:       "policy",
+		bus.ReasonBaseline:     "baseline",
+	}
+	require.Len(t, detReasons, len(want), "one row per reason byte")
+	seen := make(map[byte]string, len(detReasons))
+	for _, r := range detReasons {
+		require.NotContainsf(t, seen, r.reason, "reason %d has two rows", r.reason)
+		wantLabel, known := want[r.reason]
+		require.Truef(t, known, "reason %d is not a bus constant", r.reason)
+		assert.Equalf(t, wantLabel, r.name, "reason %d carries the wrong label", r.reason)
+		seen[r.reason] = r.name
+	}
+	for reason := byte(1); reason <= bus.ReasonBaseline; reason++ {
+		assert.Containsf(t, seen, reason, "reason %d has no row, so it would go unreported", reason)
+	}
 }
 
 // The baggage pair is the propagation health signal (ADR-003 r5) and
@@ -329,6 +373,41 @@ func TestTelemetryReportsBaggageHealth(t *testing.T) {
 		"nothing here runs backwards")
 	_, ok := metricInt64(tt, metricPrefix+"detected.keeps")
 	assert.False(t, ok, "no verdict fired, so the instrument stays off the wire entirely")
+}
+
+// The det-family callbacks repeat the nil-detector test the ingest path
+// makes before it calls Eval, and a guard no test exercises is a guard
+// the next reader deletes as dead weight. detect.Build never returns a
+// nil detector, so the state is reached by hand: the four detector
+// instruments must go quiet rather than panic the collect, while the
+// rest of the plane keeps reporting.
+func TestTelemetrySurvivesANilDetector(t *testing.T) {
+	tt := newTestTelemetry(t)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 1
+	ctx := context.Background()
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
+	p.next = new(consumertest.TracesSink)
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(ctx)) }()
+
+	// Safe to write in place: nothing ingests here, and the pooled
+	// fragmenters that would read it are built per batch.
+	p.det = nil
+	names := reportedInstruments(t, tt)
+	for _, quiet := range []string{
+		metricPrefix + "baggage.divergence_ms",
+		metricPrefix + "baggage.malformed",
+		metricPrefix + "detected.keeps",
+		metricPrefix + "skew.clamped",
+	} {
+		assert.NotContains(t, names, quiet, "a detector counter cannot be read without a detector")
+	}
+	assert.Contains(t, names, metricPrefix+"kept.local",
+		"the rest of the decision plane is unaffected")
 }
 
 // A refused Publish is the least observable failure in the flusher: the
