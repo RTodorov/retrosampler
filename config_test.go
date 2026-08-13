@@ -4,6 +4,7 @@
 package retrosampler
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -102,6 +103,13 @@ func TestConfigValidate(t *testing.T) {
 			"baseline rate negative", func(c *Config) { c.BaselineRate = -0.1 },
 			"baseline_rate must be in [0, 1]",
 		},
+		{"baseline rate at one", func(c *Config) { c.BaselineRate = 1 }, ""},
+		{
+			// NaN passes both ordered comparisons, so an un-negated
+			// range test would let it through to a silent disable.
+			"baseline rate NaN", func(c *Config) { c.BaselineRate = math.NaN() },
+			"baseline_rate must be in [0, 1]",
+		},
 		{"age threshold without t0 attribute", func(c *Config) {
 			c.TraceAgeThreshold = time.Minute
 			c.T0Attribute = ""
@@ -139,6 +147,15 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidatePolicyErrorNamesTheField(t *testing.T) {
+	cfg := validatableConfig(t)
+	cfg.Policies = []PolicyConfig{{Name: "bad", Condition: "span.name =="}}
+	err := cfg.Validate()
+	require.ErrorContains(t, err, "policies:",
+		"an operator fixes the config field, not the internal package")
+	require.ErrorContains(t, err, "bad", "the failing policy stays identifiable")
 }
 
 func TestPolicyList(t *testing.T) {

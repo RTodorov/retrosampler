@@ -5,6 +5,7 @@ package retrosampler
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/rtodorov/retrosampler/internal/detect"
@@ -126,10 +127,13 @@ func (cfg *Config) Validate() error {
 	if cfg.TraceAgeThreshold < 0 {
 		return errors.New("trace_age_threshold must be non-negative (0 disables)")
 	}
-	// This bound is the only guard: out of range, the rate reaches an
-	// architecture-dependent float64->uint64 conversion in detect.Build.
-	if cfg.BaselineRate < 0 || cfg.BaselineRate > 1 {
-		return errors.New("baseline_rate must be in [0, 1] (a negative rate keeps 100% of traffic on amd64)")
+	// Nothing downstream catches an out-of-range rate: detect.Build's >0
+	// gate silently disables a negative or NaN one, above 1 clears the
+	// 56-bit id space and keeps every trace, and 256 or more makes the
+	// float64->uint64 conversion implementation-defined. The negated form
+	// is what rejects NaN, which passes both ordered comparisons.
+	if !(cfg.BaselineRate >= 0 && cfg.BaselineRate <= 1) {
+		return errors.New("baseline_rate must be in [0, 1] (above 1 keeps every trace; negative or NaN silently disables the baseline)")
 	}
 	if cfg.TraceAgeThreshold > 0 && cfg.T0Attribute == "" {
 		return errors.New("t0_attribute is required when trace_age_threshold is set")
@@ -137,5 +141,8 @@ func (cfg *Config) Validate() error {
 	if cfg.TraceLatencyThreshold > 0 && cfg.ElapsedMSAttribute == "" {
 		return errors.New("elapsed_ms_attribute is required when trace_latency_threshold is set")
 	}
-	return detect.CheckPolicies(policyList(cfg.Policies))
+	if err := detect.CheckPolicies(policyList(cfg.Policies)); err != nil {
+		return fmt.Errorf("policies: %w", err)
+	}
+	return nil
 }
