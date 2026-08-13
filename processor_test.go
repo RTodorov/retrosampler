@@ -34,8 +34,9 @@ const testDiskBudget = 1 << 34
 
 // newTestProcessor constructs a processor over nop telemetry. The only
 // construction error is a detector that will not compile, which is a
-// config error these fixtures never carry — the tests that do want one
-// call newProcessor directly.
+// config error these fixtures never carry; that path is covered through
+// the factory, where it surfaces in production
+// (TestCreateTracesRejectsUnparsablePolicy).
 func newTestProcessor(t *testing.T, cfg *Config, b bus.Bus) *retroProcessor {
 	t.Helper()
 	p, err := newProcessor(cfg, componenttest.NewNopTelemetrySettings(), systemClock, b)

@@ -30,6 +30,25 @@ func TestNewFactory_TypeAndDefaultConfig(t *testing.T) {
 		"storage_dir and disk_budget have no safe default: the operator must choose")
 }
 
+// A policy that will not parse is a config error, and the factory is
+// where it must surface: the collector reports it while assembling the
+// pipeline, not after the component is live. Validate would reject this
+// config first in production, so it is deliberately not called here —
+// what is under test is the constructor's own refusal.
+func TestCreateTracesRejectsUnparsablePolicy(t *testing.T) {
+	t.Parallel()
+	f := NewFactory()
+	cfg := f.CreateDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Policies = []PolicyConfig{{Name: "bad", Condition: "span.name =="}}
+
+	_, err := f.CreateTraces(context.Background(),
+		processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.ErrorContains(t, err, `policy "bad"`,
+		"the detector build error names the offending policy")
+}
+
 // The factory is the one production wiring of processor, flusher and bus:
 // a fully assembled component must emit the kept trace and nothing else.
 func TestFactoryEmitsOnlyKeptTraces(t *testing.T) {

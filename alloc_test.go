@@ -176,7 +176,7 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	// misses measured ~9 allocs/batch. Point New at one pre-built entry so
 	// a forced miss recycles instead of building a fragmenter. What is
 	// measured stays processTraces exactly as production runs it; only the
-	// detector's sabotage is priced out.
+	// race detector's sabotage is priced out.
 	//
 	// Handing every miss the same entry would also hide a real regression
 	// that stops returning entries to the pool, so misses are counted and
