@@ -9,10 +9,13 @@
 package detect
 
 import (
+	"encoding/binary"
+	"math"
 	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
@@ -55,7 +58,7 @@ type Detector struct {
 	elapsedKey    string
 	readBaggage   bool
 
-	baselineThreshold uint64           // Task 3
+	baselineThreshold uint64
 	policies          []compiledPolicy // Task 4
 
 	detected         [nReasons]atomic.Uint64
@@ -83,6 +86,9 @@ func Build(cfg Config, set component.TelemetrySettings) (*Detector, error) {
 	// compiles the condition out, same as the zero value.
 	if ns := cfg.SpanLatencyThreshold.Nanoseconds(); ns > 0 {
 		d.spanLatencyNS = uint64(ns)
+	}
+	if cfg.BaselineRate > 0 {
+		d.baselineThreshold = uint64(math.Round(cfg.BaselineRate * float64(uint64(1)<<56)))
 	}
 	d.readBaggage = d.traceLatMS > 0 || d.traceAgeMS > 0
 	return d, nil
@@ -177,6 +183,23 @@ func (d *Detector) evalPolicies(ptrace.ResourceSpans, ptrace.ScopeSpans, ptrace.
 func (d *Detector) hit(r byte) byte {
 	d.detected[r].Add(1)
 	return r
+}
+
+// Baseline is the deterministic head-sample verdict (ADR-008 r1): the
+// trace id's trailing 56 bits — the OTel consistent-probability
+// randomness source, random under W3C trace-context level 2 — compared
+// against a threshold precomputed from BaselineRate. No hash, no float
+// on the hot path, identical on every instance by construction. Never
+// published; the caller routes a true through the local-only keep path.
+func (d *Detector) Baseline(id pcommon.TraceID) bool {
+	if d.baselineThreshold == 0 {
+		return false
+	}
+	if binary.BigEndian.Uint64(id[8:])&(1<<56-1) < d.baselineThreshold {
+		d.detected[bus.ReasonBaseline].Add(1)
+		return true
+	}
+	return false
 }
 
 // DetectedKeeps reports detection events for one reason — raw verdict
