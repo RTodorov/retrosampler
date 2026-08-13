@@ -72,7 +72,7 @@ func TestFragmentDecodeRoundTrip(t *testing.T) {
 	td := richTraces()
 	f := New()
 	total := 0
-	f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
+	f.Fragment(td, nil, nil, func(id pcommon.TraceID, frag []byte, _ byte, _ bool) {
 		got, err := Decode(frag)
 		require.NoError(t, err, "fragment must be a valid TracesData message")
 		require.Positive(t, got.SpanCount())

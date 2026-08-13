@@ -28,7 +28,8 @@ type Fragmenter struct {
 	ids     []pcommon.TraceID         // group insertion order
 	heads   []int32                   // per group: first ref (arena index)
 	tails   []int32                   // per group: last ref
-	keeps   []bool                    // per group: detect hit on any span
+	reasons []byte                    // per group: first non-zero detect result
+	bases   []bool                    // per group: baseline verdict at creation
 	refs    []spanRef                 // ref arena; refs[i].next chains a trace
 	flat    []spanRef                 // per-group scratch, chain flattened
 	scratch enc                       // marshal output, reused
@@ -40,28 +41,44 @@ func New() *Fragmenter {
 }
 
 // Fragment groups td's spans by trace ID and invokes fn once per trace with
-// the marshaled OTLP fragment. frag is only valid during the call. keep is
-// the OR of detect over the trace's spans in this batch; a nil detect makes
-// every keep false.
-func (f *Fragmenter) Fragment(td ptrace.Traces, detect func(ptrace.Span) bool,
-	fn func(id pcommon.TraceID, frag []byte, keep bool),
+// the marshaled OTLP fragment, its keep reason and its baseline verdict.
+// frag is only valid during the call.
+//
+// reason is the FIRST non-zero detect result over the group's spans in batch
+// order, and a group that has one pays no further detection: detect is not
+// called again for its later spans in this batch (skip-once-kept). detect
+// receives the owning ResourceSpans and ScopeSpans beside the span, so a
+// policy can read resource and scope attributes.
+//
+// base is baseline(id), evaluated exactly once per group when the group is
+// created — it is a per-trace compare, not a per-span one. A baseline-true
+// group still runs detect on every span until a reason lands, so a sampled
+// trace can upgrade to a stronger reason within the same batch.
+//
+// A nil detect makes every reason 0; a nil baseline makes every base false.
+func (f *Fragmenter) Fragment(td ptrace.Traces,
+	detect func(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace.Span) byte,
+	baseline func(id pcommon.TraceID) bool,
+	fn func(id pcommon.TraceID, frag []byte, reason byte, base bool),
 ) {
 	clear(f.groups)
 	f.ids = f.ids[:0]
 	f.heads = f.heads[:0]
 	f.tails = f.tails[:0]
-	f.keeps = f.keeps[:0]
+	f.reasons = f.reasons[:0]
+	f.bases = f.bases[:0]
 	f.refs = f.refs[:0]
 
 	rss := td.ResourceSpans()
 	for i := 0; i < rss.Len(); i++ {
-		sss := rss.At(i).ScopeSpans()
+		rs := rss.At(i)
+		sss := rs.ScopeSpans()
 		for j := 0; j < sss.Len(); j++ {
-			sps := sss.At(j).Spans()
+			ssp := sss.At(j)
+			sps := ssp.Spans()
 			for k := 0; k < sps.Len(); k++ {
 				sp := sps.At(k)
 				id := sp.TraceID()
-				hit := detect != nil && detect(sp)
 				r := idx32(len(f.refs))
 				f.refs = append(f.refs, spanRef{rs: idx32(i), ss: idx32(j), sp: idx32(k), next: -1})
 				g, ok := f.groups[id]
@@ -71,14 +88,17 @@ func (f *Fragmenter) Fragment(td ptrace.Traces, detect func(ptrace.Span) bool,
 					f.ids = append(f.ids, id)
 					f.heads = append(f.heads, r)
 					f.tails = append(f.tails, r)
-					f.keeps = append(f.keeps, hit)
-					continue
+					f.reasons = append(f.reasons, 0)
+					f.bases = append(f.bases, baseline != nil && baseline(id))
+				} else {
+					f.refs[f.tails[g]].next = r
+					f.tails[g] = r
 				}
-				if hit {
-					f.keeps[g] = true
+				// Skip-once-kept: a group with a verdict pays no further
+				// detection — OTTL never runs on an already-decided trace.
+				if f.reasons[g] == 0 && detect != nil {
+					f.reasons[g] = detect(rs, ssp, sp)
 				}
-				f.refs[f.tails[g]].next = r
-				f.tails[g] = r
 			}
 		}
 	}
@@ -90,6 +110,6 @@ func (f *Fragmenter) Fragment(td ptrace.Traces, detect func(ptrace.Span) bool,
 		}
 		f.scratch.b = f.scratch.b[:0]
 		putGroup(&f.scratch, td, f.flat)
-		fn(id, f.scratch.b, f.keeps[g])
+		fn(id, f.scratch.b, f.reasons[g], f.bases[g])
 	}
 }

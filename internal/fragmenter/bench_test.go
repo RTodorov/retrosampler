@@ -60,7 +60,7 @@ func benchTrace() ptrace.Traces {
 // has to move for ADR-004 r5 to gate it.
 func BenchmarkDecode(b *testing.B) {
 	var frag []byte
-	New().Fragment(benchTrace(), nil, func(_ pcommon.TraceID, f []byte, _ bool) {
+	New().Fragment(benchTrace(), nil, nil, func(_ pcommon.TraceID, f []byte, _ byte, _ bool) {
 		frag = append(frag[:0], f...)
 	})
 	if len(frag) == 0 {

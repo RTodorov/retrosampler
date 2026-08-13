@@ -13,6 +13,18 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
+// keepIs reads a verdict byte the way the pre-verdict tests read a bool:
+// any non-zero reason is a keep.
+func keepIs(reason byte) bool { return reason != 0 }
+
+// errDetect is the shipping keep-on-error predicate in seam form.
+func errDetect(_ ptrace.ResourceSpans, _ ptrace.ScopeSpans, sp ptrace.Span) byte {
+	if sp.Status().Code() == ptrace.StatusCodeError {
+		return 1
+	}
+	return 0
+}
+
 // allSpans flattens all spans across resources/scopes in td, in iteration order.
 func allSpans(td ptrace.Traces) []ptrace.Span {
 	var out []ptrace.Span
@@ -75,7 +87,7 @@ func TestFragmentGroupsByTrace(t *testing.T) {
 	}
 	got := map[pcommon.TraceID]int{}
 	f := New()
-	f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
+	f.Fragment(td, nil, nil, func(id pcommon.TraceID, frag []byte, _ byte, _ bool) {
 		dec, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(frag)
 		require.NoError(t, err)
 		got[id] = dec.SpanCount()
@@ -89,15 +101,15 @@ func TestFragmentGroupsByTrace(t *testing.T) {
 func TestFragmentScratchReuseAcrossCalls(t *testing.T) {
 	f := New()
 	td := testBatch(50, 5)
-	f.Fragment(td, nil, func(pcommon.TraceID, []byte, bool) {})
-	f.Fragment(td, nil, func(_ pcommon.TraceID, frag []byte, _ bool) {
+	f.Fragment(td, nil, nil, func(pcommon.TraceID, []byte, byte, bool) {})
+	f.Fragment(td, nil, nil, func(_ pcommon.TraceID, frag []byte, _ byte, _ bool) {
 		dec, err := (&ptrace.ProtoUnmarshaler{}).UnmarshalTraces(frag)
 		require.NoError(t, err)
 		assert.Positive(t, dec.SpanCount())
 	})
 }
 
-// Detection is the OR of detect over each trace's spans in the batch,
+// Detection folds each trace's spans in the batch into one verdict,
 // delivered on the same callback as the fragment (single pass).
 func TestFragmentDetectFlagsPerTrace(t *testing.T) {
 	td := ptrace.NewTraces()
@@ -113,10 +125,8 @@ func TestFragmentDetectFlagsPerTrace(t *testing.T) {
 	mk(1, ptrace.StatusCodeOk)
 
 	got := map[byte]bool{}
-	New().Fragment(td, func(sp ptrace.Span) bool {
-		return sp.Status().Code() == ptrace.StatusCodeError
-	}, func(id pcommon.TraceID, _ []byte, keep bool) {
-		got[id[0]] = keep
+	New().Fragment(td, errDetect, nil, func(id pcommon.TraceID, _ []byte, reason byte, _ bool) {
+		got[id[0]] = keepIs(reason)
 	})
 	assert.Equal(t, map[byte]bool{1: false, 2: true}, got)
 }
@@ -132,10 +142,8 @@ func TestFragmentDetectHitAfterGroupOpens(t *testing.T) {
 		sp.Status().SetCode(code)
 	}
 	got := map[byte]bool{}
-	New().Fragment(td, func(sp ptrace.Span) bool {
-		return sp.Status().Code() == ptrace.StatusCodeError
-	}, func(id pcommon.TraceID, _ []byte, keep bool) {
-		got[id[0]] = keep
+	New().Fragment(td, errDetect, nil, func(id pcommon.TraceID, _ []byte, reason byte, _ bool) {
+		got[id[0]] = keepIs(reason)
 	})
 	assert.Equal(t, map[byte]bool{1: true}, got)
 }
@@ -145,36 +153,123 @@ func TestFragmentNilDetectNeverKeeps(t *testing.T) {
 	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	sp.SetTraceID(pcommon.TraceID{1})
 	sp.Status().SetCode(ptrace.StatusCodeError)
-	New().Fragment(td, nil, func(_ pcommon.TraceID, _ []byte, keep bool) {
-		assert.False(t, keep)
+	New().Fragment(td, nil, nil, func(_ pcommon.TraceID, _ []byte, reason byte, _ bool) {
+		assert.False(t, keepIs(reason))
 	})
+}
+
+// The reason is the FIRST non-zero detect result in batch order, so a
+// later, different verdict cannot overwrite the one already recorded.
+func TestFragmentFirstReasonWins(t *testing.T) {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	id := pcommon.TraceID{1}
+	for _, name := range []string{"second-reason", "first-reason"} {
+		sp := ss.Spans().AppendEmpty()
+		sp.SetTraceID(id)
+		sp.SetName(name)
+	}
+	f := New()
+	det := func(_ ptrace.ResourceSpans, _ ptrace.ScopeSpans, sp ptrace.Span) byte {
+		if sp.Name() == "second-reason" {
+			return 2
+		}
+		return 3
+	}
+	var got byte
+	f.Fragment(td, det, nil, func(_ pcommon.TraceID, _ []byte, reason byte, _ bool) {
+		got = reason
+	})
+	assert.Equal(t, byte(2), got, "batch-order first hit wins, not the last")
+}
+
+func TestFragmentSkipsDetectOnceKept(t *testing.T) {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	id := pcommon.TraceID{1}
+	for range 5 {
+		sp := ss.Spans().AppendEmpty()
+		sp.SetTraceID(id)
+	}
+	f := New()
+	calls := 0
+	det := func(ptrace.ResourceSpans, ptrace.ScopeSpans, ptrace.Span) byte {
+		calls++
+		return 4
+	}
+	f.Fragment(td, det, nil, func(pcommon.TraceID, []byte, byte, bool) {})
+	assert.Equal(t, 1, calls, "a decided group's later spans must not pay detection")
+}
+
+func TestFragmentBaselineOncePerGroupAndUpgrade(t *testing.T) {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	id := pcommon.TraceID{1}
+	for i := range 3 {
+		sp := ss.Spans().AppendEmpty()
+		sp.SetTraceID(id)
+		if i == 2 {
+			sp.SetName("err")
+		}
+	}
+	f := New()
+	baseCalls := 0
+	base := func(pcommon.TraceID) bool { baseCalls++; return true }
+	det := func(_ ptrace.ResourceSpans, _ ptrace.ScopeSpans, sp ptrace.Span) byte {
+		if sp.Name() == "err" {
+			return 1
+		}
+		return 0
+	}
+	var reason byte
+	var wasBase bool
+	f.Fragment(td, det, base, func(_ pcommon.TraceID, _ []byte, r byte, b bool) {
+		reason, wasBase = r, b
+	})
+	assert.Equal(t, 1, baseCalls, "baseline is a per-group compare, not per-span")
+	assert.Equal(t, byte(1), reason, "a baseline group must still upgrade on a later hit")
+	assert.True(t, wasBase)
+}
+
+func TestFragmentNilHooks(t *testing.T) {
+	td := ptrace.NewTraces()
+	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	sp.SetTraceID(pcommon.TraceID{1})
+	f := New()
+	var reason byte = 99
+	base := true
+	f.Fragment(td, nil, nil, func(_ pcommon.TraceID, _ []byte, r byte, b bool) {
+		reason, base = r, b
+	})
+	assert.Zero(t, reason)
+	assert.False(t, base)
 }
 
 func TestFragmentZeroAllocSteadyState(t *testing.T) {
 	f := New()
 	td := testBatch(100, 4)
-	noop := func(pcommon.TraceID, []byte, bool) {}
+	noop := func(pcommon.TraceID, []byte, byte, bool) {}
 	for range 100 { // warm every internal high-water mark
-		f.Fragment(td, nil, noop)
+		f.Fragment(td, nil, nil, noop)
 	}
 	avg := testing.AllocsPerRun(100, func() {
-		f.Fragment(td, nil, noop)
+		f.Fragment(td, nil, nil, noop)
 	})
 	assert.Zero(t, avg, "hot-path bookkeeping allocs must be 0 (ADR-004 r2)")
 }
 
-// The shipping path passes a real detect, so the allocation gate has to hold
-// with the predicate wired in, not only for the nil case.
-func TestFragmentZeroAllocWithDetect(t *testing.T) {
+// The shipping path passes real hooks, so the allocation gate has to hold
+// with detect and baseline wired in, not only for the nil case.
+func TestFragmentZeroAllocWithHooks(t *testing.T) {
 	f := New()
 	td := testBatch(100, 4)
-	noop := func(pcommon.TraceID, []byte, bool) {}
-	detect := func(sp ptrace.Span) bool { return sp.Status().Code() == ptrace.StatusCodeError }
+	noop := func(pcommon.TraceID, []byte, byte, bool) {}
+	baseline := func(id pcommon.TraceID) bool { return id[0]&1 == 0 }
 	for range 100 { // warm every internal high-water mark
-		f.Fragment(td, detect, noop)
+		f.Fragment(td, errDetect, baseline, noop)
 	}
 	avg := testing.AllocsPerRun(100, func() {
-		f.Fragment(td, detect, noop)
+		f.Fragment(td, errDetect, baseline, noop)
 	})
-	assert.Zero(t, avg, "detect must not allocate on the hot path (ADR-004 r2)")
+	assert.Zero(t, avg, "the hooks must not allocate on the hot path (ADR-004 r2)")
 }

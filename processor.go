@@ -52,7 +52,7 @@ type retroProcessor struct {
 	fl        *flusher
 	tb        *metadata.TelemetryBuilder
 	subCancel func()
-	detect    func(sp ptrace.Span) bool
+	detect    func(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace.Span) byte
 }
 
 // pooledFrag pairs a fragmenter with a reusable routing callback,
@@ -65,12 +65,12 @@ type pooledFrag struct {
 	set     *shards.Set
 	now     time.Time
 	refused bool
-	fn      func(id pcommon.TraceID, frag []byte, keep bool)
+	fn      func(id pcommon.TraceID, frag []byte, reason byte, base bool)
 }
 
 func (p *retroProcessor) newPooledFrag() *pooledFrag {
 	pf := &pooledFrag{f: fragmenter.New()}
-	pf.fn = func(id pcommon.TraceID, frag []byte, keep bool) {
+	pf.fn = func(id pcommon.TraceID, frag []byte, reason byte, _ bool) {
 		if !pf.set.Offer(id, frag, pf.now) {
 			pf.refused = true
 		}
@@ -80,7 +80,7 @@ func (p *retroProcessor) newPooledFrag() *pooledFrag {
 		// waiting on the broadcast — which is why the shard layer does
 		// not floor-gate Keep (ADR-008 r4). Dropping it here would leave
 		// an error trace undecided for as long as the shed lasts.
-		if keep && !pf.set.Keep(id, bus.ReasonError, pf.now) {
+		if reason != 0 && !pf.set.Keep(id, reason, pf.now) {
 			// A lost verdict with accepted fragments would silently
 			// un-decide an error trace: refuse the batch instead.
 			pf.refused = true
@@ -95,8 +95,11 @@ func (p *retroProcessor) newPooledFrag() *pooledFrag {
 func newProcessor(cfg *Config, logger *zap.Logger, now func() time.Time, b bus.Bus) *retroProcessor {
 	p := &retroProcessor{cfg: cfg, logger: logger, now: now, b: b}
 	if cfg.KeepOnError {
-		p.detect = func(sp ptrace.Span) bool {
-			return sp.Status().Code() == ptrace.StatusCodeError
+		p.detect = func(_ ptrace.ResourceSpans, _ ptrace.ScopeSpans, sp ptrace.Span) byte {
+			if sp.Status().Code() == ptrace.StatusCodeError {
+				return bus.ReasonError
+			}
+			return 0
 		}
 	}
 	p.fragPool.New = func() any { return p.newPooledFrag() }
@@ -156,7 +159,7 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 	}
 	pf := p.fragPool.Get().(*pooledFrag)
 	pf.set, pf.now, pf.refused = s, p.now(), false
-	pf.f.Fragment(td, p.detect, pf.fn)
+	pf.f.Fragment(td, p.detect, nil, pf.fn)
 	refused := pf.refused
 	pf.set = nil
 	p.fragPool.Put(pf)
