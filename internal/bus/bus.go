@@ -12,9 +12,19 @@ package bus
 
 import "context"
 
-// ReasonError marks a keep triggered by the keep-on-error built-in.
-// Further reasons (latency, age, baseline) join with their conditions.
-const ReasonError byte = 1
+// Keep reasons carried in the bus contract's optional reason byte
+// (ADR-008 r6). 0 always means "no verdict". ReasonBaseline never
+// crosses the bus — baseline keeps are local-only by contract
+// (ADR-008 r1) — but it shares this space so one byte names every
+// decision source in telemetry and FlushJobs alike.
+const (
+	ReasonError        byte = 1
+	ReasonSpanLatency  byte = 2
+	ReasonTraceLatency byte = 3
+	ReasonTraceAge     byte = 4
+	ReasonPolicy       byte = 5
+	ReasonBaseline     byte = 6
+)
 
 // Bus is the keep-notification transport. Subscribe's fn is invoked on
 // a bus-owned goroutine; cancel is idempotent and waits for that
