@@ -161,6 +161,21 @@ func (sh *shard) handle(s *Set, fb *fragBuf) {
 	sh.free <- fb
 }
 
+// clampAt pulls an event's stamp back to this worker's own clock (the
+// ingest side of ADR-008 r7 time hygiene). A producer clock running ahead
+// of ours used to be unreclaimable: a future tMax outlived BOTH Expire and
+// the watermark rung's floor check, so enough skewed data could pin a
+// shard atFloor and shed all its ingest until real time passed the skew,
+// and a future keep deadline held its decided entry — and, the ring
+// evicting in insertion order, every entry behind it — past W. One clock
+// read per event, on the worker goroutine and so off the ADR-004 producer
+// path; a no-op whenever producers stamp honestly.
+func (sh *shard) clampAt(s *Set, fb *fragBuf) {
+	if now := s.opts.Now(); fb.at.After(now) {
+		fb.at = now
+	}
+}
+
 // appendFragment writes one fragment to disk, and for an already-decided
 // trace forwards it straight through as well (ADR-008 r3). The append
 // keeps disk the source of truth for restart replay; the forward spares
@@ -168,6 +183,7 @@ func (sh *shard) handle(s *Set, fb *fragBuf) {
 // no verdict, so the job's Reason stays zero — the decided set does not
 // retain the deciding one.
 func (sh *shard) appendFragment(s *Set, fb *fragBuf) {
+	sh.clampAt(s, fb)
 	if err := sh.buf.Append(fb.id, fb.data, fb.at); err != nil {
 		s.appendErrors.Add(1)
 		return
@@ -188,6 +204,7 @@ func (sh *shard) appendFragment(s *Set, fb *fragBuf) {
 // broadcast coming back — finds the id already marked and counts as a
 // duplicate, with no second decision side effect.
 func (sh *shard) keep(s *Set, fb *fragBuf) {
+	sh.clampAt(s, fb)
 	if !sh.dec.mark(fb.id, fb.at.Add(s.opts.Window).UnixNano()) {
 		s.duplicateKeeps.Add(1)
 		return

@@ -210,3 +210,41 @@ func TestEffectiveWindowClampsFutureStampedData(t *testing.T) {
 	}, 5*time.Second, time.Millisecond, "tick must observe the finalized future segment")
 	assert.GreaterOrEqual(t, s.EffectiveWindow(), time.Duration(0))
 }
+
+// The stage-3 carry-over, closed: a future tMax pinned its segment against
+// BOTH Expire and the watermark rung until real time caught up with the
+// skew. The worker now clamps the stamp to its own clock at append, so a
+// future-stamped fragment ages out on the normal window.
+func TestFutureStampedFragmentIsReclaimable(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.Shards = 1
+	opts.Window = time.Minute
+	opts.SegmentSize = 4096
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	// An hour of skew against a one-minute window: the stamp alone would
+	// hold this data for 61 minutes of local time.
+	future := clk.Now().Add(time.Hour)
+	frag := make([]byte, 1024)
+	for n := range uint64(20) { // ~5 segments, so finalized ones exist
+		require.True(t, s.Offer(testID(n), frag, future))
+	}
+	// Every handoff buffer back in the ring means every offer above has
+	// been appended — and so stamped. Advancing the clock while one was
+	// still queued would clamp that straggler to the NEW now and pin it
+	// honestly, testing nothing.
+	sh := s.shards[0]
+	require.Eventually(t, func() bool { return len(sh.free) == queueDepth },
+		5*time.Second, time.Millisecond, "every offered fragment is appended")
+	require.Eventually(t, func() bool { return s.DiskBytesTotal() > 0 },
+		5*time.Second, time.Millisecond, "the tick reports the fragments on disk")
+
+	clk.Advance(2 * opts.Window)
+	require.Eventually(t, func() bool { return s.DiskBytesTotal() == 0 },
+		5*time.Second, 10*time.Millisecond,
+		"a clamped stamp must expire on the window, not on the skewed future")
+}
