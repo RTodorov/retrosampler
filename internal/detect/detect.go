@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.uber.org/zap"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
 )
@@ -59,7 +60,8 @@ type Detector struct {
 	readBaggage   bool
 
 	baselineThreshold uint64
-	policies          []compiledPolicy // Task 4
+	policies          []*compiledPolicy
+	logger            *zap.Logger
 
 	detected         [nReasons]atomic.Uint64
 	skewClamped      atomic.Uint64
@@ -67,20 +69,16 @@ type Detector struct {
 	divergenceMS     atomic.Int64
 }
 
-// compiledPolicy is filled in by the OTTL task; the empty struct keeps
-// this file compiling until then.
-type compiledPolicy struct{}
-
 // Build compiles cfg into a Detector. The telemetry settings feed the
-// OTTL parser (Task 4); the built-ins need none of it.
+// OTTL parser; the built-ins need none of it.
 func Build(cfg Config, set component.TelemetrySettings) (*Detector, error) {
-	_ = set
 	d := &Detector{
 		keepOnError: cfg.KeepOnError,
 		traceLatMS:  thresholdMillis(cfg.TraceLatencyThreshold),
 		traceAgeMS:  thresholdMillis(cfg.TraceAgeThreshold),
 		t0Key:       cfg.T0Attribute,
 		elapsedKey:  cfg.ElapsedMSAttribute,
+		logger:      set.Logger,
 	}
 	// A negative threshold is nonsense config; leaving the field zero
 	// compiles the condition out, same as the zero value.
@@ -91,6 +89,11 @@ func Build(cfg Config, set component.TelemetrySettings) (*Detector, error) {
 		d.baselineThreshold = uint64(math.Round(cfg.BaselineRate * float64(uint64(1)<<56)))
 	}
 	d.readBaggage = d.traceLatMS > 0 || d.traceAgeMS > 0
+	pols, err := compilePolicies(cfg.Policies, set)
+	if err != nil {
+		return nil, err
+	}
+	d.policies = pols
 	return d, nil
 }
 
@@ -138,7 +141,7 @@ func (d *Detector) Eval(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace
 			return d.hit(r)
 		}
 	}
-	return d.evalPolicies(rs, ss, sp) // 0 until Task 4
+	return d.evalPolicies(rs, ss, sp)
 }
 
 // evalBaggage reads BOTH keys whenever either baggage condition is on:
@@ -172,11 +175,6 @@ func (d *Detector) evalBaggage(sp ptrace.Span, now time.Time) byte {
 	if d.traceAgeMS > 0 && t0OK && age > d.traceAgeMS {
 		return bus.ReasonTraceAge
 	}
-	return 0
-}
-
-// evalPolicies is the OTTL tail; Task 4 fills it in.
-func (d *Detector) evalPolicies(ptrace.ResourceSpans, ptrace.ScopeSpans, ptrace.Span) byte {
 	return 0
 }
 
