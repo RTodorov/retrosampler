@@ -1,5 +1,5 @@
 {
-  "phase": "stage-5-config-surface",
+  "phase": "stage-6-integration-hardening",
   "updated": "2026-08-13",
   "roadmap": [
     "1 buffer core: fragmenter + segment store + index (spec: docs/superpowers/specs/2026-08-11-buffer-core-design.md)",

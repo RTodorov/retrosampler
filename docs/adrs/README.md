@@ -16,6 +16,7 @@ one — never edit a merged ADR.
 | 008 | [Keep decisions, pending keeps, and the bus contract](008-keep-decision-semantics.md) | Accepted | 2026-08-11 |
 | 009 | [Decision-plane contracts — keep-on-error, flusher, required buffer](009-decision-plane-contracts.md) | Accepted | 2026-08-13 |
 | 010 | [Keep-detection contracts — baggage, baseline, OTTL policies](010-keep-detection-contracts.md) | Accepted | 2026-08-13 |
+| 011 | [Bus client and integration-hardening contracts](011-bus-client-and-integration-hardening.md) | Accepted | 2026-08-13 |
 
 ## Conventions
 
