@@ -1,0 +1,227 @@
+// Copyright The retrosampler Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package natsbus_test
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/rtodorov/retrosampler/internal/bus"
+	"github.com/rtodorov/retrosampler/internal/bus/bustest"
+	"github.com/rtodorov/retrosampler/internal/bus/natsbus"
+)
+
+func coreConfig(url string) natsbus.Config {
+	return natsbus.Config{
+		URL: url, Mode: natsbus.ModeAtMostOnce,
+		Subject: "test.keeps", Stream: "test-keeps", Window: time.Minute,
+	}
+}
+
+func newCoreClient(t *testing.T, url string) *natsbus.Client {
+	t.Helper()
+	c, err := natsbus.New(coreConfig(url))
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, c.Close()) })
+	return c
+}
+
+func TestCoreContract(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	url := ns.ClientURL()
+	bustest.RunContract(t, func(t *testing.T) bus.Bus {
+		t.Helper()
+		return newCoreClient(t, url)
+	})
+}
+
+func TestMalformedCountedAndDropped(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c := newCoreClient(t, ns.ClientURL())
+	got := make(chan struct{}, 4)
+	cancel, err := c.Subscribe(func([16]byte, byte) { got <- struct{}{} })
+	require.NoError(t, err)
+	defer cancel()
+	// A raw wrong-length message straight through a second connection.
+	nc, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer nc.Close()
+	require.NoError(t, nc.Publish("test.keeps", []byte("junk")))
+	require.NoError(t, nc.Flush())
+	require.Eventually(t, func() bool { return c.Malformed() == 1 },
+		5*time.Second, time.Millisecond)
+	select {
+	case <-got:
+		t.Fatal("malformed message must not invoke fn")
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Zero(t, c.Dropped(), "an undecodable payload is malformed, not a slow-consumer drop")
+}
+
+func TestNewValidatesConfig(t *testing.T) {
+	valid := coreConfig("nats://127.0.0.1:4222")
+	durable := valid
+	durable.Mode = natsbus.ModeDurable
+
+	tests := map[string]struct {
+		mutate  func(*natsbus.Config)
+		wantErr string
+	}{
+		"missing url":            {func(c *natsbus.Config) { c.URL = "" }, "URL is required"},
+		"empty mode":             {func(c *natsbus.Config) { c.Mode = "" }, `must be "durable" or "at_most_once"`},
+		"unknown mode":           {func(c *natsbus.Config) { c.Mode = "exactly_once" }, `must be "durable" or "at_most_once"`},
+		"missing subject":        {func(c *natsbus.Config) { c.Subject = "" }, "Subject is required"},
+		"core needs no stream":   {func(c *natsbus.Config) { c.Stream = "" }, ""},
+		"core needs no window":   {func(c *natsbus.Config) { c.Window = 0 }, ""},
+		"durable needs stream":   {func(c *natsbus.Config) { c.Mode, c.Stream = natsbus.ModeDurable, "" }, "Stream is required"},
+		"durable needs window":   {func(c *natsbus.Config) { c.Mode, c.Window = natsbus.ModeDurable, 0 }, "Window must be positive"},
+		"durable window is sign": {func(c *natsbus.Config) { c.Mode, c.Window = natsbus.ModeDurable, -time.Second }, "Window must be positive"},
+		"valid core":             {func(*natsbus.Config) {}, ""},
+		"valid durable":          {func(c *natsbus.Config) { c.Mode = natsbus.ModeDurable }, ""},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid
+			tc.mutate(&cfg)
+			c, err := natsbus.New(cfg)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				assert.NotNil(t, c)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Nil(t, c)
+		})
+	}
+}
+
+func TestStartAgainstUnreachableServerSucceeds(t *testing.T) {
+	// ADR-008: an outage degrades gracefully. A bus that is down when the
+	// collector boots must not fail startup — the dial retries behind the
+	// live connection object.
+	c, err := natsbus.New(coreConfig(fmt.Sprintf("nats://127.0.0.1:%d", freePort(t))))
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()), "an unreachable bus must not fail Start")
+
+	cancel, err := c.Subscribe(func([16]byte, byte) {})
+	require.NoError(t, err, "subscriptions are registered locally and replayed on connect")
+	cancel()
+	// Core mode is at-most-once: a publish while disconnected lands in the
+	// reconnect buffer rather than erroring.
+	assert.NoError(t, c.Publish(context.Background(), [16]byte{1}, bus.ReasonError))
+	assert.NoError(t, c.Close(), "closing a never-connected client is not a failure")
+}
+
+func TestStartRejectsMalformedURL(t *testing.T) {
+	// The retry posture covers unreachable servers, not unusable options.
+	c, err := natsbus.New(coreConfig("nats://127.0.0.1:not-a-port"))
+	require.NoError(t, err)
+	err = c.Start(context.Background())
+	require.ErrorContains(t, err, "natsbus: connect:")
+	require.ErrorContains(t, err, "invalid port")
+	assert.NoError(t, c.Close())
+}
+
+func TestStartRejectsUnreadableCredentialsFile(t *testing.T) {
+	// Same unreachable URL the test above starts cleanly against, so the
+	// only difference is the credentials path: nats.go smoke-tests the
+	// file while processing options, ahead of any dial, and a typo fails
+	// startup loudly instead of silently never authenticating.
+	cfg := coreConfig(fmt.Sprintf("nats://127.0.0.1:%d", freePort(t)))
+	cfg.CredsFile = filepath.Join(t.TempDir(), "user.creds")
+	c, err := natsbus.New(cfg)
+	require.NoError(t, err)
+	require.ErrorContains(t, c.Start(context.Background()), "user.creds")
+	assert.NoError(t, c.Close())
+}
+
+func TestSubscribeBeforeStartFails(t *testing.T) {
+	c, err := natsbus.New(coreConfig("nats://127.0.0.1:4222"))
+	require.NoError(t, err)
+	cancel, err := c.Subscribe(func([16]byte, byte) {})
+	require.ErrorContains(t, err, "Subscribe before Start")
+	assert.Nil(t, cancel)
+}
+
+func TestSubscribeAfterCloseFails(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c, err := natsbus.New(coreConfig(ns.ClientURL()))
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()))
+	require.NoError(t, c.Close())
+	cancel, err := c.Subscribe(func([16]byte, byte) {})
+	require.ErrorContains(t, err, "natsbus: subscribe:")
+	require.ErrorIs(t, err, nats.ErrConnectionClosed)
+	assert.Nil(t, cancel)
+}
+
+func TestCloseBeforeStartIsNil(t *testing.T) {
+	c, err := natsbus.New(coreConfig("nats://127.0.0.1:4222"))
+	require.NoError(t, err)
+	assert.NoError(t, c.Close())
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c, err := natsbus.New(coreConfig(ns.ClientURL()))
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()))
+	require.NoError(t, c.Close())
+	assert.NoError(t, c.Close())
+}
+
+func TestReconnectsCounted(t *testing.T) {
+	dir := t.TempDir()
+	ns := startServer(t, dir, 0)
+	port := serverPort(ns)
+	c := newCoreClient(t, ns.ClientURL())
+	require.Zero(t, c.Reconnects())
+
+	ns.Shutdown()
+	ns.WaitForShutdown()
+	startServer(t, dir, port)
+
+	require.Eventually(t, func() bool { return c.Reconnects() == 1 },
+		30*time.Second, 10*time.Millisecond, "the client must redial the restarted server")
+	// Delivery resumes over the reconnected connection.
+	got := make(chan struct{}, 1)
+	cancel, err := c.Subscribe(func([16]byte, byte) { got <- struct{}{} })
+	require.NoError(t, err)
+	defer cancel()
+	require.NoError(t, c.Publish(context.Background(), [16]byte{7}, bus.ReasonError))
+	select {
+	case <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no delivery after reconnect")
+	}
+}
+
+func TestDurableModeAwaitsItsTask(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	cfg := coreConfig(ns.ClientURL())
+	cfg.Mode = natsbus.ModeDurable
+	c, err := natsbus.New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, c.Close()) })
+
+	cancel, err := c.Subscribe(func([16]byte, byte) {})
+	require.ErrorContains(t, err, "durable subscribe lands with the durable-mode task")
+	assert.Nil(t, cancel)
+
+	// Durable Publish is already the acked JetStream path; with no stream
+	// bound to the subject yet, the ack never comes and the error is the
+	// flusher's to retry.
+	ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
+	defer done()
+	assert.Error(t, c.Publish(ctx, [16]byte{1}, bus.ReasonError))
+}
