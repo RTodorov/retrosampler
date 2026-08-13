@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/collector/processor/processorhelper"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
+	"github.com/rtodorov/retrosampler/internal/detect"
 	"github.com/rtodorov/retrosampler/internal/shards"
 )
 
@@ -338,19 +339,53 @@ func TestProcessTracesKeepPathZeroAllocs(t *testing.T) {
 		"measurement must ride the copy+handoff path, not a shed early return")
 }
 
-// detectBatchSpans is the span count per trace in detectBatch. Even
-// indices carry int baggage and odd ones digit strings, so both arms of
-// readMillis — including the hand-rolled parser — sit inside the window.
+// nDetectReasons sizes a per-reason snapshot: reasons are small
+// contiguous bytes with 0 unused (bus.ReasonBaseline is the highest).
+const nDetectReasons = int(bus.ReasonBaseline) + 1
+
+// detectedByReason snapshots the detector's per-reason production
+// counters, which are the only dedup-proof view of a condition firing.
+// The shard set's KeptLocal counts DECISIONS, and the ten fixture ids are
+// all decided during warm-up, so a condition that fires on every run
+// afterwards lands in DuplicateKeeps and never moves KeptLocal at all.
+func detectedByReason(d *detect.Detector) [nDetectReasons]uint64 {
+	var out [nDetectReasons]uint64
+	for r := range out {
+		out[r] = d.DetectedKeeps(byte(r))
+	}
+	return out
+}
+
+// detectBatchSpans is the span count per trace in detectBatch. Odd
+// indices carry int baggage and EVEN ones digit strings, so both arms of
+// readMillis sit inside the window and — since the count is odd — the
+// last span of the batch is string-armed. That ordering is what lets the
+// divergence assert see the string arm at all: the store is last-write-
+// wins, so an int-armed span at the end would mask it.
 const detectBatchSpans = 5
 
-// detectElapsedMS is the baggage elapsed_ms every span carries: healthy,
-// far under the trace-latency threshold the gate arms.
-const detectElapsedMS = 900
+// detectIntElapsedMS and detectStrElapsedMS are the baggage elapsed_ms
+// the two arms carry. Both stay under the armed trace-latency threshold,
+// and they straddle the ~1s T0 offset so the arms store divergences of
+// OPPOSITE SIGN: age−elapsed is positive for the int arm and negative for
+// the string arm. Divergence is stored only when BOTH keys parse, so a
+// string arm that stopped returning ok would skip its store and leave the
+// int arm's positive value behind — which is exactly what the sign test
+// below catches, and what a bare non-zero test would not.
+//
+// Both bounds are load-bearing. Raising detectIntElapsedMS past the T0
+// offset makes both arms negative and the guard hollow; raising
+// detectStrElapsedMS to the threshold fires ReasonTraceLatency. Neither
+// has anything to do with allocations.
+const (
+	detectIntElapsedMS = 900
+	detectStrElapsedMS = 3_000_000
+)
 
-// detectBatch is allocBatch with every built-in armed and fed: healthy
-// spans below every threshold, both baggage attributes present in both
-// wire shapes, and trace ids whose trailing bits miss the tiny baseline
-// rate. No condition fires, so the window stays producer-only.
+// detectBatch is allocBatch with every built-in armed and fed: spans
+// below every threshold, both baggage attributes present in both wire
+// shapes, and trace ids whose trailing bits miss the tiny baseline rate.
+// No condition fires, so nothing short-circuits the chain.
 //
 // The keys come from cfg rather than literals. A gate that stamped a
 // name the detector no longer reads would take the not-found return out
@@ -365,13 +400,14 @@ func detectBatch(cfg *Config, now time.Time) ptrace.Traces {
 	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
 	t0 := now.Add(-time.Second).UnixMilli()
 	t0Str := strconv.FormatInt(t0, 10)
-	elapsedStr := strconv.Itoa(detectElapsedMS)
+	elapsedStr := strconv.Itoa(detectStrElapsedMS)
 	for i := range allocBatchTraces {
 		var id pcommon.TraceID
 		id[0] = 0x40
 		// Baseline compares the trailing 56 bits, id[9..15]. Held near max
 		// so every id misses the armed rate, with the low nibble keeping
-		// the ids distinct — 0xF0|i stays far above the threshold.
+		// the ids distinct while allocBatchTraces <= 16 — 0xF0|i stays far
+		// above the threshold either way.
 		for j := 9; j < 15; j++ {
 			id[j] = 0xFF
 		}
@@ -382,9 +418,9 @@ func detectBatch(cfg *Config, now time.Time) ptrace.Traces {
 			sp.SetName("op")
 			sp.SetStartTimestamp(pcommon.NewTimestampFromTime(now))
 			sp.SetEndTimestamp(pcommon.NewTimestampFromTime(now.Add(time.Millisecond)))
-			if k%2 == 0 {
+			if k%2 == 1 {
 				sp.Attributes().PutInt(cfg.T0Attribute, t0)
-				sp.Attributes().PutInt(cfg.ElapsedMSAttribute, detectElapsedMS)
+				sp.Attributes().PutInt(cfg.ElapsedMSAttribute, detectIntElapsedMS)
 			} else {
 				sp.Attributes().PutStr(cfg.T0Attribute, t0Str)
 				sp.Attributes().PutStr(cfg.ElapsedMSAttribute, elapsedStr)
@@ -418,7 +454,7 @@ func TestDetectBuiltinsZeroAllocs(t *testing.T) {
 	// is walked to its end on every span rather than short-circuited by a
 	// hit, which is the expensive shape and so the one worth pricing.
 	cfg.SpanLatencyThreshold = time.Minute // spans run 1ms
-	cfg.TraceLatencyThreshold = time.Hour  // elapsed_ms is 900
+	cfg.TraceLatencyThreshold = time.Hour  // elapsed_ms tops out at 50min
 	cfg.TraceAgeThreshold = 24 * time.Hour // T0 is a second back
 	cfg.BaselineRate = 0.000001            // the chosen id tails miss it
 	p := newTestProcessor(t, cfg, bus.NewLoopback())
@@ -437,23 +473,35 @@ func TestDetectBuiltinsZeroAllocs(t *testing.T) {
 
 	set := p.set.Load()
 	before, missesBefore := set.Stats(), misses
+	detBefore, malformedBefore := detectedByReason(p.det), p.det.BaggageMalformed()
 	avg := testing.AllocsPerRun(nRuns, func() {
 		_, _ = p.processTraces(ctx, td)
 		runtime.Gosched()
 	})
 	after := set.Stats()
+	detAfter, malformedAfter := detectedByReason(p.det), p.det.BaggageMalformed()
 
 	assert.Zero(t, avg, "ADR-004 r2: 0 allocs/span with every built-in armed")
 	assert.Equal(t, before.KeptLocal, after.KeptLocal,
-		"no built-in may fire here: a keep would move the exempt flush path "+
-			"inside the budget and stop the chain being walked to its end")
+		"the measured window must stay producer-only: a worker deciding a trace "+
+			"inside it would charge the exempt flush-side allocations to this budget")
 	assert.Less(t, shedTotal(after)-shedTotal(before), uint64(allocBatchTraces*(nRuns+1)/20),
 		"measurement must ride the copy+handoff path, not the queue-full shed")
 	assert.Less(t, misses-missesBefore, (nRuns+1)/2,
 		"measurement must ride pool hits, not New")
-	// Both baggage keys parsed on every span, so neither readMillis arm
-	// took an early return: malformed counts the rejections, and a stored
-	// divergence needs the int AND the string to have both come back ok.
-	assert.Zero(t, p.det.BaggageMalformed(), "the digit-string arm must parse, not reject")
-	assert.Positive(t, p.det.DivergenceMS(), "both baggage reads must reach the divergence store")
+	// That the chain was walked to its END is a separate claim from the one
+	// above, and only these deltas carry it. KeptLocal cannot: the ten ids
+	// are decided during warm-up, so a condition firing on every run is
+	// deduped into DuplicateKeeps and leaves KeptLocal flat.
+	for r := 1; r < nDetectReasons; r++ {
+		assert.Equalf(t, detBefore[r], detAfter[r],
+			"reason %d fired inside the window: the chain short-circuited there "+
+				"instead of paying for every condition", r)
+	}
+	// Neither readMillis arm took an early return. Malformed counts the
+	// rejections; the negative sign proves the LAST divergence store came
+	// from a string-armed span with both keys parsed, since only that arm
+	// carries an elapsed_ms above the T0 offset.
+	assert.Equal(t, malformedBefore, malformedAfter, "the digit-string arm must parse, not reject")
+	assert.Negative(t, p.det.DivergenceMS(), "the string arm must reach the divergence store")
 }
