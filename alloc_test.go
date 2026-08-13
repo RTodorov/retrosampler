@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processorhelper"
-	"go.uber.org/zap"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
 	"github.com/rtodorov/retrosampler/internal/shards"
@@ -158,8 +157,9 @@ func warmUp(t *testing.T, p *retroProcessor, batch func(n uint64) ptrace.Traces,
 // budget.
 //
 // Detection is inside the measured window: KeepOnError defaults on, so
-// p.detect runs over every span of the batch. allocBatch is healthy, so
-// the verdict is false throughout and no keep is enqueued — the keep
+// the detector runs over every span of the batch, and the baseline
+// closure over every group. allocBatch is healthy and the default rate
+// is 0, so both answer no throughout and no keep is enqueued — the keep
 // path has its own gate below.
 func TestProcessTracesZeroAllocs(t *testing.T) {
 	const nRuns = 100
@@ -168,7 +168,7 @@ func TestProcessTracesZeroAllocs(t *testing.T) {
 	cfg.StorageDir = t.TempDir()
 	cfg.SegmentSize = 1 << 30 // no roll during measurement
 	pinShardFixture(cfg)
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = consumertest.NewNop()
 	// sync.Pool drops one Put in four on purpose under the race detector
 	// (go1.25 sync/pool.go Put), and every suite here runs with -race, so
@@ -281,7 +281,7 @@ func TestProcessTracesKeepPathZeroAllocs(t *testing.T) {
 	cfg.SegmentSize = 1 << 30 // no roll during measurement
 	pinShardFixture(cfg)
 	sink := new(consumertest.TracesSink)
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = sink
 	// Same pool treatment as the gate above: the race detector drops one
 	// Put in four, and a forced miss must recycle rather than build.

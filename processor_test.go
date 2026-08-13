@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processorhelper"
-	"go.uber.org/zap"
 
 	"github.com/rtodorov/retrosampler/internal/buffer"
 	"github.com/rtodorov/retrosampler/internal/bus"
@@ -33,6 +32,17 @@ import (
 // Nothing preallocates it.
 const testDiskBudget = 1 << 34
 
+// newTestProcessor constructs a processor over nop telemetry. The only
+// construction error is a detector that will not compile, which is a
+// config error these fixtures never carry — the tests that do want one
+// call newProcessor directly.
+func newTestProcessor(t *testing.T, cfg *Config, b bus.Bus) *retroProcessor {
+	t.Helper()
+	p, err := newProcessor(cfg, componenttest.NewNopTelemetrySettings(), systemClock, b)
+	require.NoError(t, err)
+	return p
+}
+
 // startTestProcessor builds a started processor on temp storage wired to
 // sink and b, shut down via t.Cleanup. The cleanup shutdown is a second
 // call for the tests that shut down themselves: it must still return nil.
@@ -42,13 +52,130 @@ func startTestProcessor(t *testing.T, sink consumer.Traces, b bus.Bus) (*retroPr
 	cfg.StorageDir = t.TempDir()
 	cfg.DiskBudget = testDiskBudget
 	cfg.Shards = 2
-	p := newProcessor(cfg, zap.NewNop(), systemClock, b)
+	p := newTestProcessor(t, cfg, b)
 	// next is wired by the factory in production, which receives the
 	// consumer separately from the config.
 	p.next = sink
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	t.Cleanup(func() { require.NoError(t, p.shutdown(context.Background())) })
 	return p, cfg
+}
+
+// baseTime anchors span timestamps in the detection tests. The
+// span-latency built-in reads the span's own start and end, so the
+// anchor only has to be stable — it is unrelated to the processor clock.
+var baseTime = time.Unix(1_700_000_000, 0)
+
+// newStartedProcessor starts a processor on cfg over a recording bus, so
+// a test can assert both what flushed and what crossed the bus. Shut
+// down via t.Cleanup, like startTestProcessor.
+func newStartedProcessor(t *testing.T, cfg *Config) (*retroProcessor, *consumertest.TracesSink, *busSpy) {
+	t.Helper()
+	sink := new(consumertest.TracesSink)
+	spy := newBusSpy()
+	p := newTestProcessor(t, cfg, spy)
+	p.next = sink
+	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
+	t.Cleanup(func() { require.NoError(t, p.shutdown(context.Background())) })
+	return p, sink, spy
+}
+
+// singleSpanTrace is a one-span batch under id, handed to mutate for the
+// attribute or timestamp the condition under test reads.
+func singleSpanTrace(id pcommon.TraceID, mutate func(ptrace.Span)) ptrace.Traces {
+	td := ptrace.NewTraces()
+	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	sp.SetTraceID(id)
+	sp.SetName("op")
+	if mutate != nil {
+		mutate(sp)
+	}
+	return td
+}
+
+// consumeAccepted pushes td through the processor and requires the
+// accepted answer: buffered, with the flusher owning any emission.
+func consumeAccepted(t *testing.T, p *retroProcessor, td ptrace.Traces) {
+	t.Helper()
+	_, err := p.processTraces(context.Background(), td)
+	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
+}
+
+// waitOneKeptSpan waits for the single span of a one-trace batch to
+// reach the sink — the whole observable effect of a keep verdict.
+func waitOneKeptSpan(t *testing.T, sink *consumertest.TracesSink) {
+	t.Helper()
+	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+		5*time.Second, time.Millisecond, "the kept trace flushes")
+}
+
+// A healthy-but-slow span is kept on the span-latency threshold alone,
+// and the broadcast carries that reason rather than the error default.
+func TestSpanLatencyThresholdKeeps(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	pinShardFixture(cfg)
+	cfg.SpanLatencyThreshold = 100 * time.Millisecond
+	p, sink, spy := newStartedProcessor(t, cfg)
+
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xA1}, func(sp ptrace.Span) {
+		sp.SetStartTimestamp(pcommon.NewTimestampFromTime(baseTime))
+		sp.SetEndTimestamp(pcommon.NewTimestampFromTime(baseTime.Add(time.Second)))
+	}))
+	waitOneKeptSpan(t, sink)
+	assert.Equal(t, []publishedKeep{{id: [16]byte{0xA1}, reason: bus.ReasonSpanLatency}},
+		spy.publishedVerdicts())
+}
+
+// The baseline keep flushes this instance's fragments and stops there:
+// it is deterministic, so every instance reaches it alone and a
+// broadcast would only duplicate work (ADR-008 r1).
+func TestBaselineKeepsFlushWithoutPublish(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	pinShardFixture(cfg)
+	cfg.KeepOnError = false
+	cfg.BaselineRate = 1 // every trace: deterministic, no id gymnastics
+	p, sink, spy := newStartedProcessor(t, cfg)
+
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xB1}, nil))
+	waitOneKeptSpan(t, sink)
+	assert.Empty(t, spy.publishedVerdicts(), "baseline keeps never cross the bus (ADR-008 r1)")
+}
+
+// An OTTL policy match keeps the trace under the policy reason.
+func TestPolicyKeeps(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	pinShardFixture(cfg)
+	cfg.KeepOnError = false
+	cfg.Policies = []PolicyConfig{{Name: "attr", Condition: `span.attributes["keep"] == "yes"`}}
+	p, sink, spy := newStartedProcessor(t, cfg)
+
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xC1}, func(sp ptrace.Span) {
+		sp.Attributes().PutStr("keep", "yes")
+	}))
+	waitOneKeptSpan(t, sink)
+	require.Len(t, spy.publishedVerdicts(), 1)
+	assert.Equal(t, bus.ReasonPolicy, spy.publishedVerdicts()[0].reason)
+}
+
+// The trace-latency threshold reads accumulated baggage, and reads it
+// from the string form the W3C header actually carries.
+func TestElapsedThresholdKeepsFromStringAttr(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	pinShardFixture(cfg)
+	cfg.KeepOnError = false
+	cfg.TraceLatencyThreshold = time.Second
+	p, sink, spy := newStartedProcessor(t, cfg)
+
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xD1}, func(sp ptrace.Span) {
+		sp.Attributes().PutStr("baggage.elapsed_ms", "5000")
+	}))
+	waitOneKeptSpan(t, sink)
+	require.Len(t, spy.publishedVerdicts(), 1)
+	assert.Equal(t, bus.ReasonTraceLatency, spy.publishedVerdicts()[0].reason)
 }
 
 // errorSpanBatch is a one-span batch carrying id and an error status.
@@ -99,7 +226,7 @@ func TestKeepOnErrorDisabledEmitsNothing(t *testing.T) {
 	cfg.Shards = 2
 	cfg.KeepOnError = false
 	sink := new(consumertest.TracesSink)
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = sink
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	defer func() { require.NoError(t, p.shutdown(context.Background())) }()
@@ -230,7 +357,7 @@ func TestProcessTracesWithoutLiveSetRefuses(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.StorageDir = t.TempDir()
 	cfg.DiskBudget = testDiskBudget
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	td := ptrace.NewTraces()
 	td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	_, err := p.processTraces(context.Background(), td)
@@ -287,7 +414,7 @@ func TestShedFragmentStillLandsTheKeepVerdict(t *testing.T) {
 	// the shard parks at rung 2 rather than early-expiring.
 	cfg.DiskBudget = 2 << 20
 	sink := new(consumertest.TracesSink)
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = sink
 	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
 	defer func() { require.NoError(t, p.shutdown(context.Background())) }()

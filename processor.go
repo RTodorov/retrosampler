@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
+	"github.com/rtodorov/retrosampler/internal/detect"
 	"github.com/rtodorov/retrosampler/internal/fragmenter"
 	"github.com/rtodorov/retrosampler/internal/metadata"
 	"github.com/rtodorov/retrosampler/internal/shards"
@@ -52,25 +53,32 @@ type retroProcessor struct {
 	fl        *flusher
 	tb        *metadata.TelemetryBuilder
 	subCancel func()
-	detect    func(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace.Span) byte
+	det       *detect.Detector
 }
 
-// pooledFrag pairs a fragmenter with a reusable routing callback,
-// re-targeted per batch through the fields — the hot path stays
-// allocation-free (ADR-004 r2). refused records any enqueue refusal in
-// the batch; the whole batch then reports errOverloaded so the upstream
-// retry re-offers and re-detects (at-least-once, duplicates possible).
+// pooledFrag pairs a fragmenter with reusable callbacks, re-targeted per
+// batch through the fields — the hot path stays allocation-free (ADR-004
+// r2). refused records any enqueue refusal in the batch; the whole batch
+// then reports errOverloaded so the upstream retry re-offers and
+// re-detects (at-least-once, duplicates possible).
+//
+// detectFn and baseFn are nil when the detector can never fire, which is
+// what lets the fragmenter skip the per-span and per-group calls
+// entirely rather than paying a closure that always answers no.
 type pooledFrag struct {
-	f       *fragmenter.Fragmenter
-	set     *shards.Set
-	now     time.Time
-	refused bool
-	fn      func(id pcommon.TraceID, frag []byte, reason byte, base bool)
+	f        *fragmenter.Fragmenter
+	set      *shards.Set
+	now      time.Time
+	refused  bool
+	det      *detect.Detector
+	fn       func(id pcommon.TraceID, frag []byte, reason byte, base bool)
+	detectFn func(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace.Span) byte
+	baseFn   func(id pcommon.TraceID) bool
 }
 
 func (p *retroProcessor) newPooledFrag() *pooledFrag {
-	pf := &pooledFrag{f: fragmenter.New()}
-	pf.fn = func(id pcommon.TraceID, frag []byte, reason byte, _ bool) {
+	pf := &pooledFrag{f: fragmenter.New(), det: p.det}
+	pf.fn = func(id pcommon.TraceID, frag []byte, reason byte, base bool) {
 		if !pf.set.Offer(id, frag, pf.now) {
 			pf.refused = true
 		}
@@ -80,11 +88,27 @@ func (p *retroProcessor) newPooledFrag() *pooledFrag {
 		// waiting on the broadcast — which is why the shard layer does
 		// not floor-gate Keep (ADR-008 r4). Dropping it here would leave
 		// an error trace undecided for as long as the shed lasts.
-		if reason != 0 && !pf.set.Keep(id, reason, pf.now) {
-			// A lost verdict with accepted fragments would silently
-			// un-decide an error trace: refuse the batch instead.
-			pf.refused = true
+		//
+		// A lost verdict with accepted fragments would silently un-decide
+		// the trace, so either refusal fails the batch.
+		switch {
+		case reason != 0:
+			if !pf.set.Keep(id, reason, pf.now) {
+				pf.refused = true
+			}
+		case base:
+			// Baseline keeps flush locally and never broadcast: every
+			// instance reaches the same verdict from the id alone.
+			if !pf.set.KeepLocalOnly(id, bus.ReasonBaseline, pf.now) {
+				pf.refused = true
+			}
 		}
+	}
+	if pf.det != nil && pf.det.Enabled() {
+		pf.detectFn = func(rs ptrace.ResourceSpans, ss ptrace.ScopeSpans, sp ptrace.Span) byte {
+			return pf.det.Eval(rs, ss, sp, pf.now)
+		}
+		pf.baseFn = func(id pcommon.TraceID) bool { return pf.det.Baseline(id) }
 	}
 	return pf
 }
@@ -92,18 +116,27 @@ func (p *retroProcessor) newPooledFrag() *pooledFrag {
 // newProcessor takes the clock and bus from the caller: the factory (the
 // one production caller) passes time.Now and a fresh Loopback; tests
 // inject fakes and shared instances through the same seam (ADR-002 r4).
-func newProcessor(cfg *Config, logger *zap.Logger, now func() time.Time, b bus.Bus) *retroProcessor {
-	p := &retroProcessor{cfg: cfg, logger: logger, now: now, b: b}
-	if cfg.KeepOnError {
-		p.detect = func(_ ptrace.ResourceSpans, _ ptrace.ScopeSpans, sp ptrace.Span) byte {
-			if sp.Status().Code() == ptrace.StatusCodeError {
-				return bus.ReasonError
-			}
-			return 0
-		}
+//
+// A detector that will not compile is a config error, so it surfaces
+// here — at CreateTraces — rather than at start: the collector reports a
+// bad OTTL policy while assembling the pipeline, not after it is live.
+func newProcessor(cfg *Config, ts component.TelemetrySettings, now func() time.Time, b bus.Bus) (*retroProcessor, error) {
+	det, err := detect.Build(detect.Config{
+		KeepOnError:           cfg.KeepOnError,
+		SpanLatencyThreshold:  cfg.SpanLatencyThreshold,
+		TraceLatencyThreshold: cfg.TraceLatencyThreshold,
+		TraceAgeThreshold:     cfg.TraceAgeThreshold,
+		BaselineRate:          cfg.BaselineRate,
+		T0Attribute:           cfg.T0Attribute,
+		ElapsedMSAttribute:    cfg.ElapsedMSAttribute,
+		Policies:              policyList(cfg.Policies),
+	}, ts)
+	if err != nil {
+		return nil, err
 	}
+	p := &retroProcessor{cfg: cfg, logger: ts.Logger, now: now, b: b, det: det}
 	p.fragPool.New = func() any { return p.newPooledFrag() }
-	return p
+	return p, nil
 }
 
 func (p *retroProcessor) start(_ context.Context, _ component.Host) error {
@@ -159,7 +192,7 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 	}
 	pf := p.fragPool.Get().(*pooledFrag)
 	pf.set, pf.now, pf.refused = s, p.now(), false
-	pf.f.Fragment(td, p.detect, nil, pf.fn)
+	pf.f.Fragment(td, pf.detectFn, pf.baseFn, pf.fn)
 	refused := pf.refused
 	pf.set = nil
 	p.fragPool.Put(pf)

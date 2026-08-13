@@ -19,7 +19,6 @@ import (
 	"go.opentelemetry.io/collector/processor/processorhelper"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
-	"go.uber.org/zap"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
 	"github.com/rtodorov/retrosampler/internal/metadatatest"
@@ -196,7 +195,7 @@ func TestTelemetryCountsRefusedPublishes(t *testing.T) {
 	// The bus is the factory's one hard-wired collaborator, so the spy
 	// goes in through newProcessor — the same seam the other processor
 	// tests use — with the factory's telemetry binding applied by hand.
-	p := newProcessor(cfg, zap.NewNop(), systemClock, spy)
+	p := newTestProcessor(t, cfg, spy)
 	p.next = sink
 	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
 	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
@@ -233,7 +232,7 @@ func TestTelemetryCorruptFragmentsCountsDecodeFailures(t *testing.T) {
 	cfg.DiskBudget = testDiskBudget
 	cfg.Shards = 1
 	ctx := context.Background()
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = new(consumertest.TracesSink)
 	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
 	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
@@ -285,7 +284,7 @@ func TestTelemetryGoesSilentAfterShutdown(t *testing.T) {
 	cfg.Shards = 1
 	sink := new(consumertest.TracesSink)
 	ctx := context.Background()
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = sink
 	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
 	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
@@ -326,7 +325,7 @@ func TestTelemetryUnbindsWithoutStart(t *testing.T) {
 	cfg.StorageDir = t.TempDir()
 	cfg.DiskBudget = testDiskBudget
 	ctx := context.Background()
-	p := newProcessor(cfg, zap.NewNop(), systemClock, bus.NewLoopback())
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
 	p.next = new(consumertest.TracesSink)
 	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
 	require.NoError(t, p.shutdown(ctx), "shutdown without start is a no-op")

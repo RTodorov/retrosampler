@@ -105,12 +105,21 @@ func spanNames(sink *consumertest.TracesSink) []string {
 	return names
 }
 
+// publishedKeep is one broadcast verdict as the spy saw it. The reason
+// is recorded alongside the id because what crosses the bus is the
+// verdict, not just the trace: a keep published under the wrong reason
+// misattributes it on every other instance.
+type publishedKeep struct {
+	id     [16]byte
+	reason byte
+}
+
 // busSpy records publishes, and refuses them while failing is set.
 type busSpy struct {
 	bus.Bus
-	failing atomic.Bool
-	mu      sync.Mutex
-	ids     [][16]byte
+	failing  atomic.Bool
+	mu       sync.Mutex
+	verdicts []publishedKeep
 }
 
 func newBusSpy() *busSpy { return &busSpy{Bus: bus.NewLoopback()} }
@@ -120,7 +129,7 @@ func (b *busSpy) Publish(ctx context.Context, id [16]byte, reason byte) error {
 		return errors.New("bus unavailable")
 	}
 	b.mu.Lock()
-	b.ids = append(b.ids, id)
+	b.verdicts = append(b.verdicts, publishedKeep{id: id, reason: reason})
 	b.mu.Unlock()
 	return b.Bus.Publish(ctx, id, reason)
 }
@@ -128,7 +137,15 @@ func (b *busSpy) Publish(ctx context.Context, id [16]byte, reason byte) error {
 func (b *busSpy) published() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return len(b.ids)
+	return len(b.verdicts)
+}
+
+// publishedVerdicts snapshots what has crossed the bus so far; the copy
+// keeps the caller's assertions off the flusher goroutine's slice.
+func (b *busSpy) publishedVerdicts() []publishedKeep {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]publishedKeep(nil), b.verdicts...)
 }
 
 func TestFlusherPublishesDecodesAndConsumes(t *testing.T) {
