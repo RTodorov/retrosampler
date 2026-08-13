@@ -19,18 +19,18 @@ import (
 	"github.com/rtodorov/retrosampler/internal/shards"
 )
 
-// detReasons pairs every keep reason with the attribute set its counter
-// reports under, built once rather than per collect.
+// detReasons names every keep reason for the reason attribute: one row
+// per byte in 1..bus.ReasonBaseline, pinned by TestDetReasonsPinsEveryLabel.
 var detReasons = []struct {
 	reason byte
-	attrs  metric.MeasurementOption
+	name   string
 }{
-	{bus.ReasonError, metric.WithAttributes(attribute.String("reason", "error"))},
-	{bus.ReasonSpanLatency, metric.WithAttributes(attribute.String("reason", "span_latency"))},
-	{bus.ReasonTraceLatency, metric.WithAttributes(attribute.String("reason", "trace_latency"))},
-	{bus.ReasonTraceAge, metric.WithAttributes(attribute.String("reason", "trace_age"))},
-	{bus.ReasonPolicy, metric.WithAttributes(attribute.String("reason", "policy"))},
-	{bus.ReasonBaseline, metric.WithAttributes(attribute.String("reason", "baseline"))},
+	{bus.ReasonError, "error"},
+	{bus.ReasonSpanLatency, "span_latency"},
+	{bus.ReasonTraceLatency, "trace_latency"},
+	{bus.ReasonTraceAge, "trace_age"},
+	{bus.ReasonPolicy, "policy"},
+	{bus.ReasonBaseline, "baseline"},
 }
 
 // asInt64 narrows a counter to the width the OTel instruments take. The
@@ -53,8 +53,9 @@ func asInt64(v uint64) int64 {
 // a zero there would read as a reset, whereas an absent data point says
 // exactly what is true: this component is not running. That same load
 // is also what makes p.fl safe to read without a second atomic, since
-// start assigns the flusher before it publishes the set; p.det is safer
-// still, assigned at construction, before any callback can exist.
+// start assigns the flusher before it publishes the set. The detector
+// is read behind detectorLive, which repeats the nil-detector test the
+// ingest path makes before it calls Eval.
 //
 // The attributed instruments extend that silence per series: a reason
 // or a policy whose counter is still zero is not observed at all, so a
@@ -78,18 +79,36 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 	fl := func(read func(*flusher) int64) metric.Int64Callback {
 		return live(func(*shards.Set) int64 { return read(p.fl) })
 	}
+	// detectorLive is the det-family guard: the same nil-set test as live,
+	// plus the nil-detector test the hot path makes before it calls Eval.
+	// Build never returns a nil detector today, so this agrees with
+	// pooledFrag rather than disputing it.
+	detectorLive := func() bool { return p.set.Load() != nil && p.det != nil }
 	det := func(read func(*detect.Detector) int64) metric.Int64Callback {
-		return live(func(*shards.Set) int64 { return read(p.det) })
+		return func(_ context.Context, o metric.Int64Observer) error {
+			if detectorLive() {
+				o.Observe(read(p.det))
+			}
+			return nil
+		}
 	}
-	// The policy names are immutable after Build and the counters are
-	// addressed by index, so the attribute sets resolve once here.
-	polAttrs := make([]metric.MeasurementOption, 0, len(p.det.PolicyNames()))
-	for _, name := range p.det.PolicyNames() {
-		polAttrs = append(polAttrs, metric.WithAttributes(attribute.String("policy", name)))
+	// Both attribute tables resolve once here: the reason set is fixed and
+	// the policy names are immutable after Build, so no collect allocates.
+	reasonAttrs := make([]metric.MeasurementOption, len(detReasons))
+	for i, r := range detReasons {
+		reasonAttrs[i] = metric.WithAttributes(attribute.String("reason", r.name))
+	}
+	var polNames []string
+	if p.det != nil {
+		polNames = p.det.PolicyNames()
+	}
+	polAttrs := make([]metric.MeasurementOption, len(polNames))
+	for i, name := range polNames {
+		polAttrs[i] = metric.WithAttributes(attribute.String("policy", name))
 	}
 	perPolicy := func(read func(int) uint64) metric.Int64Callback {
 		return func(_ context.Context, o metric.Int64Observer) error {
-			if p.set.Load() == nil {
+			if !detectorLive() {
 				return nil
 			}
 			for i, attrs := range polAttrs {
@@ -123,12 +142,12 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 		),
 		tb.RegisterProcessorRetrosamplerDetectedKeepsCallback(
 			func(_ context.Context, o metric.Int64Observer) error {
-				if p.set.Load() == nil {
+				if !detectorLive() {
 					return nil
 				}
-				for _, r := range detReasons {
+				for i, r := range detReasons {
 					if v := p.det.DetectedKeeps(r.reason); v > 0 {
-						o.Observe(asInt64(v), r.attrs)
+						o.Observe(asInt64(v), reasonAttrs[i])
 					}
 				}
 				return nil
