@@ -50,16 +50,18 @@ results() {
   block "$file" example.com/selftest "$@"
 }
 
-# The gated set stands in for ADR-004 r5's five gated benchmarks. Its size
+# The gated set stands in for ADR-004 r5's six gated benchmarks. Its size
 # is what the gate's pairing floor counts, so it moves when the ADR moves.
 alpha=(BenchmarkAlpha-8 100.0 0.5000 0)
 beta=(BenchmarkBeta-8 200.0 0.5000 0)
 gamma=(BenchmarkGamma-8 300.0 0.5000 0)
 delta=(BenchmarkDelta-8 400.0 0.5000 0)
 epsilon=(BenchmarkEpsilon-8 500.0 0.5000 0)
-gated=("${alpha[@]}" "${beta[@]}" "${gamma[@]}" "${delta[@]}" "${epsilon[@]}")
+zeta=(BenchmarkZeta-8 600.0 0.5000 0)
+gated=("${alpha[@]}" "${beta[@]}" "${gamma[@]}" "${delta[@]}" "${epsilon[@]}"
+  "${zeta[@]}")
 # rest is the gated set minus alpha, for the cases that move alpha alone.
-rest=("${beta[@]}" "${gamma[@]}" "${delta[@]}" "${epsilon[@]}")
+rest=("${beta[@]}" "${gamma[@]}" "${delta[@]}" "${epsilon[@]}" "${zeta[@]}")
 
 pass=0
 # expect runs the gate over the fixtures just written: $1 is pass|fail,
@@ -92,7 +94,7 @@ expect() {
 # 1. Identical runs pass, and say how many benchmarks they compared.
 results "$base" "${gated[@]}"
 results "$new" "${gated[@]}"
-expect pass "identical runs pass" "bench gate OK (class selftest, 5 compared)"
+expect pass "identical runs pass" "bench gate OK (class selftest, 6 compared)"
 
 # 2. A time/op regression beyond 10% fails (ADR-004 r5).
 results "$new" BenchmarkAlpha-8 130.0 0.5000 0 "${rest[@]}"
@@ -124,14 +126,15 @@ expect pass "ungated sheds/op +100% passes" "bench gate OK"
 #    nothing at all (ADR-004 r4).
 results "$new" BenchmarkAlpha-16 100.0 0.5000 0 \
   BenchmarkBeta-16 200.0 0.5000 0 BenchmarkGamma-16 300.0 0.5000 0 \
-  BenchmarkDelta-16 400.0 0.5000 0 BenchmarkEpsilon-16 500.0 0.5000 0
-expect fail "unpaired baseline fails" "0 of 5 gated benchmarks paired"
+  BenchmarkDelta-16 400.0 0.5000 0 BenchmarkEpsilon-16 500.0 0.5000 0 \
+  BenchmarkZeta-16 600.0 0.5000 0
+expect fail "unpaired baseline fails" "0 of 6 gated benchmarks paired"
 
 # 8. Losing one benchmark of the gated set is a failure too - a rename, a
 #    package move or a narrowed -bench regex must not let its rows vanish
 #    quietly while the survivors report OK.
 results "$new" "${alpha[@]}"
-expect fail "one of five gated benchmarks fails" "1 of 5 gated benchmarks paired"
+expect fail "one of six gated benchmarks fails" "1 of 6 gated benchmarks paired"
 
 # 9. A baseline-only benchmark under its own package yields a whole one-sided
 #    table with no delta column at all. It must neither count nor fail: a
@@ -140,8 +143,8 @@ expect fail "one of five gated benchmarks fails" "1 of 5 gated benchmarks paired
 #    ungated BenchmarkOffer rows; those are gated now, and the shape they left
 #    behind is still the one a renamed or retired benchmark makes.
 results "$base" "${gated[@]}"
-block "$base" example.com/selftest/other BenchmarkZeta-8 600.0 0.5000 0
+block "$base" example.com/selftest/other BenchmarkOmega-8 700.0 0.5000 0
 results "$new" "${gated[@]}"
-expect pass "baseline-only benchmark is ignored" "bench gate OK (class selftest, 5 compared)"
+expect pass "baseline-only benchmark is ignored" "bench gate OK (class selftest, 6 compared)"
 
 echo "bench gate selftest OK ($pass cases)"

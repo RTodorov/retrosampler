@@ -1,76 +1,92 @@
 PASS
-ok  	github.com/rtodorov/retrosampler	0.398s
+ok  	github.com/rtodorov/retrosampler	0.481s
 goos: darwin
 goarch: arm64
 pkg: github.com/rtodorov/retrosampler/internal/buffer
 cpu: Apple M1 Max
-BenchmarkIngest-10       	   27420	     38770 ns/op	       387.7 ns/span	    4092 B/op	       0 allocs/op
-BenchmarkIngest-10       	   37014	     34871 ns/op	       348.7 ns/span	    3902 B/op	       0 allocs/op
-BenchmarkIngest-10       	   35798	     33705 ns/op	       337.0 ns/span	    4034 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36812	     33563 ns/op	       335.6 ns/span	    3923 B/op	       0 allocs/op
-BenchmarkIngest-10       	   37322	     34003 ns/op	       340.0 ns/span	    3869 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36523	     34050 ns/op	       340.5 ns/span	    3954 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36506	     33263 ns/op	       332.6 ns/span	    3956 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36370	     35432 ns/op	       354.3 ns/span	    3971 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36620	     37199 ns/op	       372.0 ns/span	    3944 B/op	       0 allocs/op
-BenchmarkIngest-10       	   36612	     33903 ns/op	       339.0 ns/span	    3944 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    111437 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    115869 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    112511 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    114781 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    108547 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    109282 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    115166 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    111954 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	   10000	    112538 ns/op	       0 B/op	       0 allocs/op
-BenchmarkKeepFlush-10    	    9354	    110816 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1242381	      1013 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1245780	       965.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1230973	       980.9 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1229380	       959.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1204399	       971.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1229923	       964.1 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1209344	       959.8 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1227504	       957.0 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1254171	       951.3 ns/op	       0 B/op	       0 allocs/op
-BenchmarkExpiry-10       	 1242667	      1006 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIngest-10       	   23266	     48168 ns/op	       481.7 ns/span	    4823 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33858	     43184 ns/op	       431.8 ns/span	    3733 B/op	       0 allocs/op
+BenchmarkIngest-10       	   34171	     43273 ns/op	       432.7 ns/span	    3699 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33966	     37185 ns/op	       371.8 ns/span	    3721 B/op	       0 allocs/op
+BenchmarkIngest-10       	   34554	     41121 ns/op	       411.2 ns/span	    3658 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33686	     37046 ns/op	       370.5 ns/span	    3752 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33688	     36439 ns/op	       364.4 ns/span	    3752 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33961	     37509 ns/op	       375.1 ns/span	    3722 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33435	     37304 ns/op	       373.0 ns/span	    3780 B/op	       0 allocs/op
+BenchmarkIngest-10       	   33049	     37306 ns/op	       373.1 ns/span	    3825 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    107830 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    111652 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    109896 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    108120 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    108895 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    107181 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    109039 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    107322 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    108221 ns/op	       0 B/op	       0 allocs/op
+BenchmarkKeepFlush-10    	   10000	    113589 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1211841	       960.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1233315	       961.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1219930	       958.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1231740	       958.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1229386	       960.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1238332	       966.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1224606	       960.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1208205	       963.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1227130	       957.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExpiry-10       	 1218280	       976.3 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/buffer	49.754s
+ok  	github.com/rtodorov/retrosampler/internal/buffer	50.031s
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/bus	0.413s
+ok  	github.com/rtodorov/retrosampler/internal/bus	0.544s
+goos: darwin
+goarch: arm64
+pkg: github.com/rtodorov/retrosampler/internal/detect
+cpu: Apple M1 Max
+BenchmarkPolicyEval-10    	21695497	        54.76 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22309964	        53.41 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22784503	        52.70 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22788722	        52.96 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	23056452	        53.03 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22908432	        54.11 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22914902	        52.91 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22501018	        54.92 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22453898	        53.15 ns/op	      16 B/op	       1 allocs/op
+BenchmarkPolicyEval-10    	22591618	        53.15 ns/op	      16 B/op	       1 allocs/op
+PASS
+ok  	github.com/rtodorov/retrosampler/internal/detect	12.624s
 goos: darwin
 goarch: arm64
 pkg: github.com/rtodorov/retrosampler/internal/fragmenter
 cpu: Apple M1 Max
-BenchmarkDecode-10    	   70820	     17309 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   66368	     17262 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   71143	     17028 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   72148	     16635 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   71226	     16954 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   70681	     16972 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   70311	     17166 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   72106	     16799 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   71811	     16677 ns/op	   25936 B/op	     566 allocs/op
-BenchmarkDecode-10    	   71386	     16806 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   65754	     16997 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   75198	     16153 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   74696	     16354 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   73926	     16303 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   73198	     16410 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   74082	     16344 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   75433	     16150 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   74728	     16250 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   65102	     17543 ns/op	   25936 B/op	     566 allocs/op
+BenchmarkDecode-10    	   69513	     16759 ns/op	   25936 B/op	     566 allocs/op
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/fragmenter	12.440s
+ok  	github.com/rtodorov/retrosampler/internal/fragmenter	12.321s
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/metadata	0.377s
+ok  	github.com/rtodorov/retrosampler/internal/metadata	0.444s
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/metadatatest	0.407s
+ok  	github.com/rtodorov/retrosampler/internal/metadatatest	0.430s
 goos: darwin
 goarch: arm64
 pkg: github.com/rtodorov/retrosampler/internal/shards
 cpu: Apple M1 Max
-BenchmarkOffer-10    	 3802263	       316.7 ns/op	         0 sheds/op	     235 B/op	       0 allocs/op
-BenchmarkOffer-10    	 4290166	       295.7 ns/op	         0 sheds/op	     208 B/op	       0 allocs/op
-BenchmarkOffer-10    	 3988784	       320.5 ns/op	         0 sheds/op	     224 B/op	       0 allocs/op
-BenchmarkOffer-10    	 4253420	       293.7 ns/op	         0 sheds/op	     210 B/op	       0 allocs/op
-BenchmarkOffer-10    	 4361637	       299.7 ns/op	         0 sheds/op	     205 B/op	       0 allocs/op
-BenchmarkOffer-10    	 4275073	       286.8 ns/op	         0 sheds/op	     209 B/op	       0 allocs/op
-BenchmarkOffer-10    	 3703932	       306.7 ns/op	         0 sheds/op	     241 B/op	       0 allocs/op
-BenchmarkOffer-10    	 3879049	       285.0 ns/op	         0 sheds/op	     231 B/op	       0 allocs/op
-BenchmarkOffer-10    	 4523559	       329.5 ns/op	         0 sheds/op	     218 B/op	       0 allocs/op
-BenchmarkOffer-10    	 3878112	       297.6 ns/op	         0 sheds/op	     231 B/op	       0 allocs/op
+BenchmarkOffer-10    	 3659160	       327.3 ns/op	         0 sheds/op	     214 B/op	       0 allocs/op
+BenchmarkOffer-10    	 4277558	       335.0 ns/op	         0 sheds/op	     209 B/op	       0 allocs/op
+BenchmarkOffer-10    	 3084278	       352.8 ns/op	         0 sheds/op	     230 B/op	       0 allocs/op
+BenchmarkOffer-10    	 3727257	       329.8 ns/op	         0 sheds/op	     240 B/op	       0 allocs/op
+BenchmarkOffer-10    	 3434739	       346.9 ns/op	         0 sheds/op	     209 B/op	       0 allocs/op
+BenchmarkOffer-10    	 4121589	       320.0 ns/op	         0 sheds/op	     217 B/op	       0 allocs/op
+BenchmarkOffer-10    	 4309076	       350.7 ns/op	         0 sheds/op	     207 B/op	       0 allocs/op
+BenchmarkOffer-10    	 4241546	       343.4 ns/op	         0 sheds/op	     211 B/op	       0 allocs/op
+BenchmarkOffer-10    	 4391152	       327.7 ns/op	         0 sheds/op	     203 B/op	       0 allocs/op
+BenchmarkOffer-10    	 3923269	       314.2 ns/op	         0 sheds/op	     228 B/op	       0 allocs/op
 PASS
-ok  	github.com/rtodorov/retrosampler/internal/shards	17.818s
+ok  	github.com/rtodorov/retrosampler/internal/shards	19.522s
