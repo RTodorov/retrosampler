@@ -71,7 +71,7 @@ vuln:
 	$(TOOLS_DIR)/govulncheck ./...
 
 bench:
-	go test -p 1 -run '^$$' -bench '^(BenchmarkIngest|BenchmarkKeepFlush|BenchmarkExpiry|BenchmarkOffer|BenchmarkDecode)$$' \
+	go test -p 1 -run '^$$' -bench '^(BenchmarkIngest|BenchmarkKeepFlush|BenchmarkExpiry|BenchmarkOffer|BenchmarkDecode|BenchmarkPolicyEval)$$' \
 	  -benchmem -count=10 ./... | tee bench-new.txt
 
 bench-gate: bench

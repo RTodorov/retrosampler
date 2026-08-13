@@ -32,10 +32,13 @@ fi
 # scripts/bench_gate_selftest.sh holds this parsing to both directions.
 #
 # gated is the size of ADR-004 r5's gated set - Ingest, KeepFlush, Expiry,
-# Offer, Decode (Offer and Decode joined per ADR-009's amendment). That many
-# benchmarks must actually pair, or benchmarks have gone missing from the run
-# and their regressions with them. Baseline rows with no counterpart by design
-# simply do not count toward it: a baseline outlives the run that recorded it.
+# Offer, Decode, PolicyEval (Offer and Decode joined per ADR-009's amendment;
+# PolicyEval is the OTTL path's own committed baseline that ADR-004 r2 and
+# ADR-008 r2 require - the one benchmark whose allocs are priced rather than
+# forbidden). That many benchmarks must actually pair, or benchmarks have gone
+# missing from the run and their regressions with them. Baseline rows with no
+# counterpart by design simply do not count toward it: a baseline outlives the
+# run that recorded it.
 #
 # Moving the set takes TWO edits, and this number is the harmless one. What
 # decides whether a benchmark runs at all is the -bench regex in the Makefile's
@@ -45,7 +48,7 @@ fi
 # benchmarks ARE gated for regressions but may vanish from the run unnoticed.
 # The floor is a minimum, not a filter - every benchmark that pairs is checked
 # either way - so this number says only which ones must not go missing.
-gated=5
+gated=6
 paired=$(benchstat -format csv "$base" bench-new.txt | awk -F, -v gated="$gated" '
   $1 == "" {
     metric = ""
