@@ -84,6 +84,10 @@ func TestSetupTelemetry(t *testing.T) {
 		observer.Observe(1)
 		return nil
 	}))
+	require.NoError(t, tb.RegisterProcessorRetrosamplerPendingPublishesAbandonedCallback(func(_ context.Context, observer metric.Int64Observer) error {
+		observer.Observe(1)
+		return nil
+	}))
 	require.NoError(t, tb.RegisterProcessorRetrosamplerPolicyEvalErrorsCallback(func(_ context.Context, observer metric.Int64Observer) error {
 		observer.Observe(1)
 		return nil
@@ -162,6 +166,9 @@ func TestSetupTelemetry(t *testing.T) {
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorRetrosamplerPendingFlushes(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualProcessorRetrosamplerPendingPublishesAbandoned(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorRetrosamplerPolicyEvalErrors(t, testTel,

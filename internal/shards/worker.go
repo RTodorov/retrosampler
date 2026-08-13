@@ -53,10 +53,15 @@ type shard struct {
 }
 
 // pendReq is parked flush work: need-bits to run when the flush channel
-// has room again, deduped by trace id.
+// has room again, deduped by trace id. deadline bounds NeedPublish only
+// (ADR-011 r3): it is the keep's own deadline, carried through every
+// re-park so retries age against the original decision rather than the
+// latest failure. NeedFlush needs no deadline — expiry empties its
+// Collect.
 type pendReq struct {
-	reason byte
-	need   Need
+	reason   byte
+	need     Need
+	deadline int64
 }
 
 // run is the shard worker loop: appends handed-off fragments, ticks
@@ -92,7 +97,7 @@ func (sh *shard) tick(s *Set) {
 	s.expiredBytes.Add(sh.buf.Expire(now))
 	sh.dec.evict(now.UnixNano())
 	sh.decidedLen.Store(int64(sh.dec.len()))
-	sh.retryPending(s)
+	sh.retryPending(s, now.UnixNano())
 	sh.reportDisk(s)
 
 	limit := s.opts.DiskBudget / 100 * int64(s.opts.WatermarkPct)
@@ -156,7 +161,7 @@ func (sh *shard) handle(s *Set, fb *fragBuf) {
 		sh.keep(s, fb)
 	case evRetry:
 		s.flushRetries.Add(1)
-		sh.park(fb.id, fb.reason, fb.need)
+		sh.park(s, fb.id, fb.reason, fb.need, fb.deadline)
 	}
 	sh.free <- fb
 }
@@ -227,22 +232,24 @@ func (sh *shard) keep(s *Set, fb *fragBuf) {
 	case OriginBus:
 		s.keptBus.Add(1)
 	}
-	sh.collectAndSend(s, fb.id, fb.reason, need)
+	// The publish deadline is the keep's own: decide time + W, the same
+	// instant the decided entry expires (ADR-011 r3).
+	sh.collectAndSend(s, fb.id, fb.reason, need, fb.at.Add(s.opts.Window).UnixNano())
 }
 
 // collectAndSend builds id's job from the buffer and hands it to the
 // flusher, parking the intent on a full channel. A zero-fragment job
 // still goes out when it owes a publish — the verdict must broadcast even
 // when this batch's fragments were refused.
-func (sh *shard) collectAndSend(s *Set, id [16]byte, reason byte, need Need) {
-	j := &FlushJob{ID: id, Reason: reason, Need: need}
+func (sh *shard) collectAndSend(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
+	j := &FlushJob{ID: id, Reason: reason, Need: need, Deadline: deadline}
 	skipped, err := sh.buf.Collect(id, func(frag []byte) {
 		j.Frags = append(j.Frags, append([]byte(nil), frag...))
 	})
 	s.corruptFragments.Add(lenU64(skipped))
 	if err != nil {
 		// Read failure: the fragments stay on disk, so retry on the tick.
-		sh.park(id, reason, need)
+		sh.park(s, id, reason, need, deadline)
 		return
 	}
 	if len(j.Frags) == 0 && need&NeedPublish == 0 {
@@ -259,28 +266,44 @@ func (sh *shard) sendJob(s *Set, j *FlushJob) {
 	select {
 	case s.opts.Flush <- j:
 	default:
-		sh.park(j.ID, j.Reason, j.Need)
+		sh.park(s, j.ID, j.Reason, j.Need, j.Deadline)
 	}
 }
 
 // park merges flush work into the pending map: need-bits OR, first
-// nonzero reason wins.
-func (sh *shard) park(id [16]byte, reason byte, need Need) {
+// nonzero reason wins, and the first deadline holds. An established
+// deadline must never slide (ADR-011 r3) — every re-park deletes and
+// recreates the entry, so a re-stamp here would push the horizon out on
+// each failing cycle and the intent would outlive W forever, which is
+// the unbounded growth the deadline exists to close. The now+W fallback
+// covers the paths that carry none: they owe no publish, so it is inert.
+func (sh *shard) park(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
 	req := sh.pend[id]
 	if req.reason == 0 {
 		req.reason = reason
+	}
+	if req.deadline == 0 {
+		req.deadline = deadline
+	}
+	if req.deadline == 0 {
+		req.deadline = s.opts.Now().Add(s.opts.Window).UnixNano()
 	}
 	req.need |= need
 	sh.pend[id] = req
 }
 
-// retryPending replays every parked intent once against the buffer.
+// retryPending replays every parked intent once against the buffer,
+// dropping the publish bit of any intent now past its deadline (ADR-011
+// r3): past W every peer's fragments of that trace have aged out, so the
+// broadcast can no longer cause a flush anywhere and abandoning it loses
+// nothing that still exists. An intent left owing nothing is simply gone.
+//
 // The keys are snapshotted first because collectAndSend re-parks on a
 // still-full channel, and Go leaves it undefined whether a range revisits
 // a key re-added during iteration — one retry per intent per tick has to
 // be exact. The scratch slice is worker-local and reused; the tick is off
 // the hot path either way.
-func (sh *shard) retryPending(s *Set) {
+func (sh *shard) retryPending(s *Set, now int64) {
 	sh.pendScratch = sh.pendScratch[:0]
 	for id := range sh.pend {
 		sh.pendScratch = append(sh.pendScratch, id)
@@ -288,7 +311,14 @@ func (sh *shard) retryPending(s *Set) {
 	for _, id := range sh.pendScratch {
 		req := sh.pend[id]
 		delete(sh.pend, id)
-		sh.collectAndSend(s, id, req.reason, req.need)
+		if req.need&NeedPublish != 0 && now >= req.deadline {
+			req.need &^= NeedPublish
+			s.publishesAbandoned.Add(1)
+		}
+		if req.need == 0 {
+			continue
+		}
+		sh.collectAndSend(s, id, req.reason, req.need, req.deadline)
 	}
 	sh.pendLen.Store(int64(len(sh.pend)))
 }

@@ -25,33 +25,34 @@ func Tracer(settings component.TelemetrySettings) trace.Tracer {
 // TelemetryBuilder provides an interface for components to report telemetry
 // as defined in metadata and user config.
 type TelemetryBuilder struct {
-	meter                                       metric.Meter
-	mu                                          sync.Mutex
-	registrations                               []metric.Registration
-	ProcessorRetrosamplerAppendErrors           metric.Int64ObservableCounter
-	ProcessorRetrosamplerBaggageDivergenceMs    metric.Int64ObservableGauge
-	ProcessorRetrosamplerBaggageMalformed       metric.Int64ObservableCounter
-	ProcessorRetrosamplerCorruptFragments       metric.Int64ObservableCounter
-	ProcessorRetrosamplerDecidedEntries         metric.Int64ObservableGauge
-	ProcessorRetrosamplerDetectedKeeps          metric.Int64ObservableCounter
-	ProcessorRetrosamplerDuplicateKeeps         metric.Int64ObservableCounter
-	ProcessorRetrosamplerEarlyExpiredSegments   metric.Int64ObservableCounter
-	ProcessorRetrosamplerEffectiveWindowSeconds metric.Int64ObservableGauge
-	ProcessorRetrosamplerExpiredBytes           metric.Int64ObservableCounter
-	ProcessorRetrosamplerFlushErrors            metric.Int64ObservableCounter
-	ProcessorRetrosamplerFlushRetries           metric.Int64ObservableCounter
-	ProcessorRetrosamplerFlushedSpans           metric.Int64ObservableCounter
-	ProcessorRetrosamplerKeptBus                metric.Int64ObservableCounter
-	ProcessorRetrosamplerKeptLocal              metric.Int64ObservableCounter
-	ProcessorRetrosamplerPendingFlushes         metric.Int64ObservableGauge
-	ProcessorRetrosamplerPolicyEvalErrors       metric.Int64ObservableCounter
-	ProcessorRetrosamplerPolicyMatches          metric.Int64ObservableCounter
-	ProcessorRetrosamplerPublishErrors          metric.Int64ObservableCounter
-	ProcessorRetrosamplerPublishedKeeps         metric.Int64ObservableCounter
-	ProcessorRetrosamplerShedFloorProtected     metric.Int64ObservableCounter
-	ProcessorRetrosamplerShedNothingReclaimable metric.Int64ObservableCounter
-	ProcessorRetrosamplerShedQueueFull          metric.Int64ObservableCounter
-	ProcessorRetrosamplerSkewClamped            metric.Int64ObservableCounter
+	meter                                          metric.Meter
+	mu                                             sync.Mutex
+	registrations                                  []metric.Registration
+	ProcessorRetrosamplerAppendErrors              metric.Int64ObservableCounter
+	ProcessorRetrosamplerBaggageDivergenceMs       metric.Int64ObservableGauge
+	ProcessorRetrosamplerBaggageMalformed          metric.Int64ObservableCounter
+	ProcessorRetrosamplerCorruptFragments          metric.Int64ObservableCounter
+	ProcessorRetrosamplerDecidedEntries            metric.Int64ObservableGauge
+	ProcessorRetrosamplerDetectedKeeps             metric.Int64ObservableCounter
+	ProcessorRetrosamplerDuplicateKeeps            metric.Int64ObservableCounter
+	ProcessorRetrosamplerEarlyExpiredSegments      metric.Int64ObservableCounter
+	ProcessorRetrosamplerEffectiveWindowSeconds    metric.Int64ObservableGauge
+	ProcessorRetrosamplerExpiredBytes              metric.Int64ObservableCounter
+	ProcessorRetrosamplerFlushErrors               metric.Int64ObservableCounter
+	ProcessorRetrosamplerFlushRetries              metric.Int64ObservableCounter
+	ProcessorRetrosamplerFlushedSpans              metric.Int64ObservableCounter
+	ProcessorRetrosamplerKeptBus                   metric.Int64ObservableCounter
+	ProcessorRetrosamplerKeptLocal                 metric.Int64ObservableCounter
+	ProcessorRetrosamplerPendingFlushes            metric.Int64ObservableGauge
+	ProcessorRetrosamplerPendingPublishesAbandoned metric.Int64ObservableCounter
+	ProcessorRetrosamplerPolicyEvalErrors          metric.Int64ObservableCounter
+	ProcessorRetrosamplerPolicyMatches             metric.Int64ObservableCounter
+	ProcessorRetrosamplerPublishErrors             metric.Int64ObservableCounter
+	ProcessorRetrosamplerPublishedKeeps            metric.Int64ObservableCounter
+	ProcessorRetrosamplerShedFloorProtected        metric.Int64ObservableCounter
+	ProcessorRetrosamplerShedNothingReclaimable    metric.Int64ObservableCounter
+	ProcessorRetrosamplerShedQueueFull             metric.Int64ObservableCounter
+	ProcessorRetrosamplerSkewClamped               metric.Int64ObservableCounter
 }
 
 // TelemetryBuilderOption applies changes to default builder.
@@ -305,6 +306,21 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPendingFlushesCall
 	return nil
 }
 
+// RegisterProcessorRetrosamplerPendingPublishesAbandonedCallback sets callback for observable ProcessorRetrosamplerPendingPublishesAbandoned metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPendingPublishesAbandonedCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerPendingPublishesAbandoned, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerPendingPublishesAbandoned)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
 // RegisterProcessorRetrosamplerPolicyEvalErrorsCallback sets callback for observable ProcessorRetrosamplerPolicyEvalErrors metric.
 func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPolicyEvalErrorsCallback(cb metric.Int64Callback) error {
 	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
@@ -547,6 +563,12 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol.processor.retrosampler.pending.flushes",
 		metric.WithDescription("Flush intents parked awaiting retry. [Development]"),
 		metric.WithUnit("{flushes}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerPendingPublishesAbandoned, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.pending.publishes_abandoned",
+		metric.WithDescription("Parked publish intents dropped past their decided deadline (~keep time + W). Past W no peer fragment survives, so the broadcast could cause nothing (ADR-011 r3). [Development]"),
+		metric.WithUnit("{publishes}"),
 	)
 	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerPolicyEvalErrors, err = builder.meter.Int64ObservableCounter(

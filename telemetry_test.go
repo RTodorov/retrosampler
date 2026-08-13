@@ -57,6 +57,7 @@ var wantInstruments = []string{
 	metricPrefix + "kept.bus",
 	metricPrefix + "kept.local",
 	metricPrefix + "pending.flushes",
+	metricPrefix + "pending.publishes_abandoned",
 	metricPrefix + "policy.eval_errors",
 	metricPrefix + "policy.matches",
 	metricPrefix + "publish.errors",
@@ -448,6 +449,65 @@ func TestTelemetryCountsRefusedPublishes(t *testing.T) {
 		"the refused publish is counted and its need-bit re-parked for the tick to retry")
 	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"published.keeps"),
 		"nothing reached the bus")
+}
+
+// An outage that outlasts W ends in abandonment (ADR-011 r3), and that
+// is the least observable event the flusher can produce: the trace still
+// flushes locally, so nothing downstream shows that the peers holding
+// the rest of it never heard the verdict. publish.errors cannot stand in
+// for it either — it counts attempts, and abandonment is the moment the
+// attempts stop.
+func TestTelemetryCountsAbandonedPublishes(t *testing.T) {
+	tt := newTestTelemetry(t)
+	spy := newBusSpy()
+	spy.failing.Store(true)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 1
+	ctx := context.Background()
+	// The deadline is W past the keep's own stamp, so W has to be crossed
+	// on the processor's clock rather than waited out in wall time.
+	clk := newFakeProcClock(baseTime)
+	p, err := newProcessor(cfg, tt.NewTelemetrySettings(), clk.Now, spy)
+	require.NoError(t, err)
+	p.next = new(consumertest.TracesSink)
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(ctx)) }()
+
+	// Under a real outage the flusher's own Retry is the re-park path —
+	// tick collects, publish refuses, need-bits come back — so the clock
+	// crosses W in two steps with cycles in between: a Retry that dropped
+	// the deadline, or a park that re-derived it, would restart the count
+	// from the latest failure and the intent would outlive W forever.
+	// Waiting out two further retries is what puts a whole cycle after the
+	// first step; short of that the test still passes, it just stops
+	// distinguishing those mutants.
+	consumeAccepted(t, p, errorSpanBatch(pcommon.TraceID{0xAB}, "unbroadcastable"))
+	retries := func() int64 {
+		v, _ := metricInt64(tt, metricPrefix+"flush.retries")
+		return v
+	}
+	require.Eventually(t, func() bool { return retries() >= 1 },
+		10*time.Second, 10*time.Millisecond, "the refused publish parks for retry")
+
+	clk.Advance(cfg.Window / 2)
+	parked := retries()
+	require.Eventually(t, func() bool { return retries() >= parked+2 },
+		10*time.Second, 10*time.Millisecond, "the outage keeps re-parking against the moved clock")
+	require.Zero(t, requireMetricInt64(t, tt, metricPrefix+"pending.publishes_abandoned"),
+		"inside W the broadcast can still cause a flush, so it is still owed")
+
+	clk.Advance(cfg.Window/2 + time.Second)
+	require.Eventually(t, func() bool {
+		v, ok := metricInt64(tt, metricPrefix+"pending.publishes_abandoned")
+		return ok && v == 1
+	}, 10*time.Second, 10*time.Millisecond, "past W the parked publish is dropped and counted")
+	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"published.keeps"),
+		"nothing ever reached the bus")
+	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"pending.flushes"),
+		"the intent owed nothing else, so it is gone rather than parked")
 }
 
 // corrupt.fragments is the one counter fed from two places: fragments
