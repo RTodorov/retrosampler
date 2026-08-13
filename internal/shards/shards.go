@@ -85,10 +85,14 @@ const (
 type Origin uint8
 
 // Keep origins: local detection publishes its verdict onward to the bus,
-// where a bus-received keep never re-publishes (ADR-008 r3).
+// where a bus-received keep never re-publishes (ADR-008 r3), and a
+// baseline keep is local-only by contract — every instance computes the
+// same deterministic verdict, so a broadcast would only manufacture
+// duplicates (ADR-008 r1).
 const (
 	OriginLocal Origin = iota
 	OriginBus
+	OriginBaseline
 )
 
 // atFloorCause values: why rung 2 is shedding this shard's ingest.
@@ -298,6 +302,14 @@ func (s *Set) Offer(id [16]byte, frag []byte, now time.Time) bool {
 // data volume (ADR-008 r4).
 func (s *Set) Keep(id [16]byte, reason byte, now time.Time) bool {
 	return s.enqueueKeep(id, OriginLocal, reason, now, nil, false)
+}
+
+// KeepLocalOnly enqueues a keep that flushes this instance's fragments
+// but never broadcasts: the baseline path. Same non-blocking refusal
+// contract as Keep — false refuses the batch, and the upstream retry
+// re-detects the same verdict deterministically.
+func (s *Set) KeepLocalOnly(id [16]byte, reason byte, now time.Time) bool {
+	return s.enqueueKeep(id, OriginBaseline, reason, now, nil, false)
 }
 
 // KeepFromBus enqueues a bus-received keep, blocking on a full free ring
