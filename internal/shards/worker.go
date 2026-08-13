@@ -193,10 +193,13 @@ func (sh *shard) keep(s *Set, fb *fragBuf) {
 		return
 	}
 	need := NeedFlush
-	if fb.origin == OriginLocal {
+	switch fb.origin {
+	case OriginLocal:
 		s.keptLocal.Add(1)
-		need |= NeedPublish // only a local verdict owes a broadcast
-	} else {
+		need |= NeedPublish // the one origin that owes a broadcast
+	case OriginBaseline:
+		s.keptLocal.Add(1)
+	case OriginBus:
 		s.keptBus.Add(1)
 	}
 	sh.collectAndSend(s, fb.id, fb.reason, need)

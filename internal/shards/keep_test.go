@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/rtodorov/retrosampler/internal/bus"
 )
 
 // waitKept polls until the keep counters reach want, failing on timeout.
@@ -22,6 +24,22 @@ func waitKept(t *testing.T, s *Set, wantLocal, wantBus, wantDup uint64) {
 		return st.KeptLocal == wantLocal && st.KeptBus == wantBus &&
 			st.DuplicateKeeps == wantDup
 	}, 5*time.Second, time.Millisecond)
+}
+
+// assertNoJobWithPublish fails if anything already queued owes a
+// broadcast. The caller must first wait for the keep under test to have
+// been handled — a suppressed verdict sends nothing at all, so an empty
+// channel is the expected outcome, not evidence of a race.
+func assertNoJobWithPublish(t *testing.T, ch <-chan *FlushJob) {
+	t.Helper()
+	for {
+		select {
+		case j := <-ch:
+			assert.Zero(t, j.Need&NeedPublish, "a suppressed keep must not broadcast")
+		default:
+			return
+		}
+	}
 }
 
 // ADR-008 r5: duplicate keeps — local, bus, self-delivery — mark once
@@ -37,6 +55,57 @@ func TestKeepIdempotency(t *testing.T) {
 	require.True(t, s.Keep(id, 1, clk.Now()))
 	require.True(t, s.KeepFromBus(id, 1, clk.Now(), nil))
 	waitKept(t, s, 1, 0, 2)
+}
+
+// ADR-008 r1: the baseline verdict is deterministic on every instance,
+// so broadcasting it would only manufacture duplicates. Its keep flushes
+// this instance's fragments and stops there.
+func TestKeepLocalOnlyFlushesWithoutPublish(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 16)
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(7)
+	require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
+	require.True(t, s.KeepLocalOnly(id, bus.ReasonBaseline, clk.Now()))
+
+	j := recvJob(t, flush)
+	assert.Equal(t, NeedFlush, j.Need&(NeedFlush|NeedPublish),
+		"a baseline keep flushes but must never owe a broadcast (ADR-008 r1)")
+	assert.Equal(t, bus.ReasonBaseline, j.Reason)
+	require.Len(t, j.Frags, 1, "the flush half of the verdict still collects")
+	assert.Equal(t, uint64(1), s.Stats().KeptLocal, "baseline counts as a local decision")
+}
+
+// The ACCEPTED stage-4 gap, pinned so a future escalation change
+// announces itself here: a trace decided as baseline suppresses a later
+// error keep entirely — including its broadcast. Spans still flush
+// (decided-arrival forward); only the publish is lost, at baseline-rate
+// odds. Peers therefore expire their fragments of a trace this instance
+// kept. That is the accepted trade, not an oversight: escalating a
+// decided trace would need the decided set to retain its reason and
+// re-open for a stronger one, which ADR-008 r5 deliberately does not do.
+func TestKeepAfterBaselineIsDuplicate(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 16)
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(8)
+	require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
+	require.True(t, s.KeepLocalOnly(id, bus.ReasonBaseline, clk.Now()))
+	recvJob(t, flush) // the baseline job, so only the error keep's is left
+
+	require.True(t, s.Keep(id, bus.ReasonError, clk.Now()))
+	// One local keep and one duplicate: the error verdict was absorbed,
+	// never counted a second time and never acted on.
+	waitKept(t, s, 1, 0, 1)
+	assertNoJobWithPublish(t, flush)
 }
 
 // ADR-008 r4: a keep with no buffered spans still records decided —
