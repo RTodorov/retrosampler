@@ -80,9 +80,10 @@ func TestKeepLocalOnlyFlushesWithoutPublish(t *testing.T) {
 	assert.Equal(t, uint64(1), s.Stats().KeptLocal, "baseline counts as a local decision")
 }
 
-// The ACCEPTED stage-4 gap, pinned so a future escalation change
-// announces itself here: a trace decided as baseline suppresses a later
-// error keep entirely — including its broadcast. Spans still flush
+// The ACCEPTED stage-4 gap (ADR-010 r5), pinned so a future escalation
+// change announces itself here: a trace decided as baseline — which
+// ADR-008 r3 never publishes — suppresses a later error keep entirely,
+// including its broadcast. Spans still flush
 // (decided-arrival forward); only the publish is lost, at baseline-rate
 // odds. Peers therefore expire their fragments of a trace this instance
 // kept. That is the accepted trade, not an oversight: escalating a
