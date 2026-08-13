@@ -80,7 +80,7 @@ func encodeFrag(t *testing.T, id pcommon.TraceID, name string) []byte {
 	sp.SetTraceID(id)
 	sp.SetName(name)
 	var out []byte
-	fragmenter.New().Fragment(td, nil, func(_ pcommon.TraceID, frag []byte, _ bool) {
+	fragmenter.New().Fragment(td, nil, nil, func(_ pcommon.TraceID, frag []byte, _ byte, _ bool) {
 		out = append([]byte(nil), frag...)
 	})
 	require.NotEmpty(t, out)

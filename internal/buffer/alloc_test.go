@@ -31,16 +31,16 @@ func TestHotPathZeroAllocs(t *testing.T) {
 	now := time.Unix(1, 0)
 
 	for range 200 { // warm all high-water marks incl. index growth
-		f.Fragment(td, nil, func(id pcommon.TraceID, frag []byte, _ bool) {
+		f.Fragment(td, nil, nil, func(id pcommon.TraceID, frag []byte, _ byte, _ bool) {
 			require.NoError(t, b.Append(id, frag, now))
 		})
 	}
 
 	// Declared once, outside AllocsPerRun's measured closure: a closure
 	// literal there would allocate on capture and produce a false positive.
-	sink := func(id pcommon.TraceID, frag []byte, _ bool) { _ = b.Append(id, frag, now) }
+	sink := func(id pcommon.TraceID, frag []byte, _ byte, _ bool) { _ = b.Append(id, frag, now) }
 	avg := testing.AllocsPerRun(100, func() {
-		f.Fragment(td, nil, sink)
+		f.Fragment(td, nil, nil, sink)
 	})
 	assert.Zero(t, avg, "ADR-004 r2: 0 bookkeeping allocs/span on the hot path")
 }
