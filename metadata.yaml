@@ -38,6 +38,27 @@ telemetry:
         monotonic: true
         async: true
 
+    processor.retrosampler.baggage.divergence_ms:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Last observed (now - T0) - elapsed_ms divergence. Large values mean clock skew or a baggage propagation gap (ADR-003 rule 5).
+      unit: ms
+      gauge:
+        value_type: int
+        async: true
+
+    processor.retrosampler.baggage.malformed:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Baggage attributes present but unusable - wrong type, bad grammar, or overflow. Instrumentation misconfiguration, not a propagation gap.
+      unit: "{values}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
     processor.retrosampler.corrupt.fragments:
       prefix: otelcol.
       enabled: true
@@ -57,6 +78,17 @@ telemetry:
       unit: "{traces}"
       gauge:
         value_type: int
+        async: true
+
+    processor.retrosampler.detected.keeps:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Keep verdicts produced by local detection, by reason attribute - raw detection events, before decided-set dedup.
+      unit: "{keeps}"
+      sum:
+        value_type: int
+        monotonic: true
         async: true
 
     processor.retrosampler.duplicate.keeps:
@@ -167,6 +199,28 @@ telemetry:
         value_type: int
         async: true
 
+    processor.retrosampler.policy.eval_errors:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: OTTL policy evaluations that errored, by policy attribute. Ignore-and-count semantics - the span did not match.
+      unit: "{evaluations}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.policy.matches:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: OTTL policy matches, by policy attribute.
+      unit: "{matches}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
     processor.retrosampler.publish.errors:
       prefix: otelcol.
       enabled: true
@@ -217,6 +271,17 @@ telemetry:
       stability: development
       description: Ingest events refused because the shard queue had no free buffer. Counts refused keep verdicts as well as refused fragments.
       unit: "{fragments}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
+    processor.retrosampler.skew.clamped:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Negative durations clamped to zero (ADR-008 rule 7) - span end before start, T0 ahead of the local clock, negative elapsed_ms.
+      unit: "{clamps}"
       sum:
         value_type: int
         monotonic: true

@@ -29,8 +29,11 @@ type TelemetryBuilder struct {
 	mu                                          sync.Mutex
 	registrations                               []metric.Registration
 	ProcessorRetrosamplerAppendErrors           metric.Int64ObservableCounter
+	ProcessorRetrosamplerBaggageDivergenceMs    metric.Int64ObservableGauge
+	ProcessorRetrosamplerBaggageMalformed       metric.Int64ObservableCounter
 	ProcessorRetrosamplerCorruptFragments       metric.Int64ObservableCounter
 	ProcessorRetrosamplerDecidedEntries         metric.Int64ObservableGauge
+	ProcessorRetrosamplerDetectedKeeps          metric.Int64ObservableCounter
 	ProcessorRetrosamplerDuplicateKeeps         metric.Int64ObservableCounter
 	ProcessorRetrosamplerEarlyExpiredSegments   metric.Int64ObservableCounter
 	ProcessorRetrosamplerEffectiveWindowSeconds metric.Int64ObservableGauge
@@ -41,11 +44,14 @@ type TelemetryBuilder struct {
 	ProcessorRetrosamplerKeptBus                metric.Int64ObservableCounter
 	ProcessorRetrosamplerKeptLocal              metric.Int64ObservableCounter
 	ProcessorRetrosamplerPendingFlushes         metric.Int64ObservableGauge
+	ProcessorRetrosamplerPolicyEvalErrors       metric.Int64ObservableCounter
+	ProcessorRetrosamplerPolicyMatches          metric.Int64ObservableCounter
 	ProcessorRetrosamplerPublishErrors          metric.Int64ObservableCounter
 	ProcessorRetrosamplerPublishedKeeps         metric.Int64ObservableCounter
 	ProcessorRetrosamplerShedFloorProtected     metric.Int64ObservableCounter
 	ProcessorRetrosamplerShedNothingReclaimable metric.Int64ObservableCounter
 	ProcessorRetrosamplerShedQueueFull          metric.Int64ObservableCounter
+	ProcessorRetrosamplerSkewClamped            metric.Int64ObservableCounter
 }
 
 // TelemetryBuilderOption applies changes to default builder.
@@ -65,6 +71,36 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerAppendErrorsCallba
 		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerAppendErrors, obs: o})
 		return nil
 	}, builder.ProcessorRetrosamplerAppendErrors)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBaggageDivergenceMsCallback sets callback for observable ProcessorRetrosamplerBaggageDivergenceMs metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBaggageDivergenceMsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBaggageDivergenceMs, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBaggageDivergenceMs)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBaggageMalformedCallback sets callback for observable ProcessorRetrosamplerBaggageMalformed metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBaggageMalformedCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBaggageMalformed, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBaggageMalformed)
 	if err != nil {
 		return err
 	}
@@ -95,6 +131,21 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerDecidedEntriesCall
 		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerDecidedEntries, obs: o})
 		return nil
 	}, builder.ProcessorRetrosamplerDecidedEntries)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerDetectedKeepsCallback sets callback for observable ProcessorRetrosamplerDetectedKeeps metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerDetectedKeepsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerDetectedKeeps, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerDetectedKeeps)
 	if err != nil {
 		return err
 	}
@@ -254,6 +305,36 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPendingFlushesCall
 	return nil
 }
 
+// RegisterProcessorRetrosamplerPolicyEvalErrorsCallback sets callback for observable ProcessorRetrosamplerPolicyEvalErrors metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPolicyEvalErrorsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerPolicyEvalErrors, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerPolicyEvalErrors)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerPolicyMatchesCallback sets callback for observable ProcessorRetrosamplerPolicyMatches metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPolicyMatchesCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerPolicyMatches, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerPolicyMatches)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
 // RegisterProcessorRetrosamplerPublishErrorsCallback sets callback for observable ProcessorRetrosamplerPublishErrors metric.
 func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerPublishErrorsCallback(cb metric.Int64Callback) error {
 	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
@@ -329,6 +410,21 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerShedQueueFullCallb
 	return nil
 }
 
+// RegisterProcessorRetrosamplerSkewClampedCallback sets callback for observable ProcessorRetrosamplerSkewClamped metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerSkewClampedCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerSkewClamped, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerSkewClamped)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
 type observerInt64 struct {
 	embedded.Int64Observer
 	inst metric.Int64Observable
@@ -363,6 +459,18 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		metric.WithUnit("{fragments}"),
 	)
 	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBaggageDivergenceMs, err = builder.meter.Int64ObservableGauge(
+		"otelcol.processor.retrosampler.baggage.divergence_ms",
+		metric.WithDescription("Last observed (now - T0) - elapsed_ms divergence. Large values mean clock skew or a baggage propagation gap (ADR-003 rule 5). [Development]"),
+		metric.WithUnit("ms"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBaggageMalformed, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.baggage.malformed",
+		metric.WithDescription("Baggage attributes present but unusable - wrong type, bad grammar, or overflow. Instrumentation misconfiguration, not a propagation gap. [Development]"),
+		metric.WithUnit("{values}"),
+	)
+	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerCorruptFragments, err = builder.meter.Int64ObservableCounter(
 		"otelcol.processor.retrosampler.corrupt.fragments",
 		metric.WithDescription("Fragment skip events - corrupt length or CRC mismatch at Collect, plus decode failures at flush. Events, not distinct fragments - a retried tick re-counts the same bad bytes on disk. [Development]"),
@@ -373,6 +481,12 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol.processor.retrosampler.decided.entries",
 		metric.WithDescription("Live decided-set entries across shards. [Development]"),
 		metric.WithUnit("{traces}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerDetectedKeeps, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.detected.keeps",
+		metric.WithDescription("Keep verdicts produced by local detection, by reason attribute - raw detection events, before decided-set dedup. [Development]"),
+		metric.WithUnit("{keeps}"),
 	)
 	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerDuplicateKeeps, err = builder.meter.Int64ObservableCounter(
@@ -435,6 +549,18 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		metric.WithUnit("{flushes}"),
 	)
 	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerPolicyEvalErrors, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.policy.eval_errors",
+		metric.WithDescription("OTTL policy evaluations that errored, by policy attribute. Ignore-and-count semantics - the span did not match. [Development]"),
+		metric.WithUnit("{evaluations}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerPolicyMatches, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.policy.matches",
+		metric.WithDescription("OTTL policy matches, by policy attribute. [Development]"),
+		metric.WithUnit("{matches}"),
+	)
+	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerPublishErrors, err = builder.meter.Int64ObservableCounter(
 		"otelcol.processor.retrosampler.publish.errors",
 		metric.WithDescription("Keep verdicts the bus refused. Each one re-parks the publish need-bit for retry. [Development]"),
@@ -463,6 +589,12 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol.processor.retrosampler.shed.queue_full",
 		metric.WithDescription("Ingest events refused because the shard queue had no free buffer. Counts refused keep verdicts as well as refused fragments. [Development]"),
 		metric.WithUnit("{fragments}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerSkewClamped, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.skew.clamped",
+		metric.WithDescription("Negative durations clamped to zero (ADR-008 rule 7) - span end before start, T0 ahead of the local clock, negative elapsed_ms. [Development]"),
+		metric.WithUnit("{clamps}"),
 	)
 	errs = errors.Join(errs, err)
 	return &builder, errs
