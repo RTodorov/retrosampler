@@ -15,10 +15,12 @@
 // are guaranteed alloc-free under the ADR-004 gate. The policies list is
 // OTTL, the one place user rules are written, and it costs roughly
 // 30–110 ns and 0–3 allocations per span per condition depending on the
-// shape of the expression: enum and simple attribute compares evaluate
-// without allocating, while regex and arithmetic do not. Zero-alloc is
-// expression-shape-dependent and is never guaranteed. A deployment with
-// no policies configured pays nothing for the OTTL tail at all.
+// shape of the expression. Zero-alloc is expression-shape-dependent and
+// is never guaranteed: the gated BenchmarkPolicyEval, a single
+// string-attribute compare, costs one 16-byte allocation per span, and
+// that allocation is the compare itself rather than the pooled
+// TransformContext around it. A deployment with no policies configured
+// pays nothing for the OTTL tail at all.
 //
 // Span latency is the case to watch: express it with the
 // span_latency_threshold setting, never as an OTTL arithmetic expression
