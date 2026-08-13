@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -335,4 +336,124 @@ func TestProcessTracesKeepPathZeroAllocs(t *testing.T) {
 			"charge the exempt flush-side allocations to this budget")
 	assert.Equal(t, shedTotal(before), shedTotal(after),
 		"measurement must ride the copy+handoff path, not a shed early return")
+}
+
+// detectBatchSpans is the span count per trace in detectBatch. Even
+// indices carry int baggage and odd ones digit strings, so both arms of
+// readMillis — including the hand-rolled parser — sit inside the window.
+const detectBatchSpans = 5
+
+// detectElapsedMS is the baggage elapsed_ms every span carries: healthy,
+// far under the trace-latency threshold the gate arms.
+const detectElapsedMS = 900
+
+// detectBatch is allocBatch with every built-in armed and fed: healthy
+// spans below every threshold, both baggage attributes present in both
+// wire shapes, and trace ids whose trailing bits miss the tiny baseline
+// rate. No condition fires, so the window stays producer-only.
+//
+// The keys come from cfg rather than literals. A gate that stamped a
+// name the detector no longer reads would take the not-found return out
+// of readMillis and still pass, measuring a path shorter than the one it
+// claims to price.
+//
+// T0 is stamped relative to now in BOTH shapes rather than as a literal
+// epoch, which would drift past trace_age_threshold as the calendar moved
+// and start firing keeps.
+func detectBatch(cfg *Config, now time.Time) ptrace.Traces {
+	td := ptrace.NewTraces()
+	ss := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty()
+	t0 := now.Add(-time.Second).UnixMilli()
+	t0Str := strconv.FormatInt(t0, 10)
+	elapsedStr := strconv.Itoa(detectElapsedMS)
+	for i := range allocBatchTraces {
+		var id pcommon.TraceID
+		id[0] = 0x40
+		// Baseline compares the trailing 56 bits, id[9..15]. Held near max
+		// so every id misses the armed rate, with the low nibble keeping
+		// the ids distinct — 0xF0|i stays far above the threshold.
+		for j := 9; j < 15; j++ {
+			id[j] = 0xFF
+		}
+		id[15] = 0xF0 | byte(i)
+		for k := range detectBatchSpans {
+			sp := ss.Spans().AppendEmpty()
+			sp.SetTraceID(id)
+			sp.SetName("op")
+			sp.SetStartTimestamp(pcommon.NewTimestampFromTime(now))
+			sp.SetEndTimestamp(pcommon.NewTimestampFromTime(now.Add(time.Millisecond)))
+			if k%2 == 0 {
+				sp.Attributes().PutInt(cfg.T0Attribute, t0)
+				sp.Attributes().PutInt(cfg.ElapsedMSAttribute, detectElapsedMS)
+			} else {
+				sp.Attributes().PutStr(cfg.T0Attribute, t0Str)
+				sp.Attributes().PutStr(cfg.ElapsedMSAttribute, elapsedStr)
+			}
+		}
+	}
+	return td
+}
+
+// TestDetectBuiltinsZeroAllocs extends the ADR-004 r2 gate over the whole
+// built-in chain: error check, span-latency math, both baggage reads
+// (int attribute AND digit-string parse), trace-age math, the divergence
+// store, and the per-group baseline compare — every one of them armed,
+// inside the measured window, at 0 allocations. Until this gate the
+// zero-alloc claim on those paths rested on reading them.
+//
+// Policies are deliberately absent: the OTTL tail is exempt from this
+// budget and priced by its own benchmark (ADR-008 r2).
+//
+// The skeleton is TestProcessTracesZeroAllocs' — shared pool entry,
+// Gosched inside the window, shed and pool-miss budgets — and the
+// reasoning there for each of those applies here unchanged.
+func TestDetectBuiltinsZeroAllocs(t *testing.T) {
+	const nRuns = 100
+
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.SegmentSize = 1 << 30 // no roll during measurement
+	pinShardFixture(cfg)
+	// Every threshold armed and every one of them out of reach: the chain
+	// is walked to its end on every span rather than short-circuited by a
+	// hit, which is the expensive shape and so the one worth pricing.
+	cfg.SpanLatencyThreshold = time.Minute // spans run 1ms
+	cfg.TraceLatencyThreshold = time.Hour  // elapsed_ms is 900
+	cfg.TraceAgeThreshold = 24 * time.Hour // T0 is a second back
+	cfg.BaselineRate = 0.000001            // the chosen id tails miss it
+	p := newTestProcessor(t, cfg, bus.NewLoopback())
+	p.next = consumertest.NewNop()
+	// Same pool treatment as the gates above: the race detector drops one
+	// Put in four, and a forced miss must recycle rather than build.
+	misses := 0
+	shared := p.newPooledFrag()
+	p.fragPool.New = func() any { misses++; return shared }
+	require.NoError(t, p.start(context.Background(), componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(context.Background())) }()
+
+	td := detectBatch(cfg, systemClock())
+	ctx := context.Background()
+	warmUp(t, p, func(uint64) ptrace.Traces { return td }, nil)
+
+	set := p.set.Load()
+	before, missesBefore := set.Stats(), misses
+	avg := testing.AllocsPerRun(nRuns, func() {
+		_, _ = p.processTraces(ctx, td)
+		runtime.Gosched()
+	})
+	after := set.Stats()
+
+	assert.Zero(t, avg, "ADR-004 r2: 0 allocs/span with every built-in armed")
+	assert.Equal(t, before.KeptLocal, after.KeptLocal,
+		"no built-in may fire here: a keep would move the exempt flush path "+
+			"inside the budget and stop the chain being walked to its end")
+	assert.Less(t, shedTotal(after)-shedTotal(before), uint64(allocBatchTraces*(nRuns+1)/20),
+		"measurement must ride the copy+handoff path, not the queue-full shed")
+	assert.Less(t, misses-missesBefore, (nRuns+1)/2,
+		"measurement must ride pool hits, not New")
+	// Both baggage keys parsed on every span, so neither readMillis arm
+	// took an early return: malformed counts the rejections, and a stored
+	// divergence needs the int AND the string to have both come back ok.
+	assert.Zero(t, p.det.BaggageMalformed(), "the digit-string arm must parse, not reject")
+	assert.Positive(t, p.det.DivergenceMS(), "both baggage reads must reach the divergence store")
 }
