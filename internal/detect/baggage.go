@@ -1,8 +1,6 @@
 // Copyright The retrosampler Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package detect implements ADR-008 keep detection: the local, per-span
-// decision of whether a trace must be kept.
 package detect
 
 import "go.opentelemetry.io/collector/pdata/pcommon"
