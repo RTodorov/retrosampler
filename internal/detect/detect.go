@@ -80,8 +80,11 @@ func Build(cfg Config, set component.TelemetrySettings) (*Detector, error) {
 		elapsedKey:  cfg.ElapsedMSAttribute,
 		logger:      set.Logger,
 	}
-	// A zero-valued TelemetrySettings would otherwise leave the warn call
-	// in evalPolicies one nil dereference from panicking on the hot path.
+	// Zero-valued settings must still leave a usable logger. The OTTL
+	// parser rejects a nil logger outright, so today the policy path
+	// cannot reach Eval that way — but every other condition can, and the
+	// warn call in evalPolicies is the kind of hot-path panic a caller
+	// should not have to know to avoid.
 	if d.logger == nil {
 		d.logger = zap.NewNop()
 	}
