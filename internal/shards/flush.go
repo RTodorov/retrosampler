@@ -7,7 +7,7 @@ package shards
 type Need uint8
 
 const (
-	// NeedPublish broadcasts the keep on the bus (local-origin only).
+	// NeedPublish broadcasts the keep on the bus (OriginLocal only).
 	NeedPublish Need = 1 << iota
 	// NeedFlush decodes the fragments and hands them to the pipeline.
 	NeedFlush
