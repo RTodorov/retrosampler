@@ -49,14 +49,22 @@ type Client struct {
 	nc *nats.Conn
 	js jetstream.JetStream
 
-	// inFn counts in-flight fn deliveries; cancel skips its wait while
-	// one is running (a cancel from inside fn cannot wait for fn's own
-	// return — the relaxation the hardening tier pins).
+	// inFn counts in-flight fn deliveries. The durable cancel consults it
+	// to skip its wait when the cancel comes from inside fn, which cannot
+	// wait for fn's own return; core-mode wait semantics belong to the
+	// hardening tier (ADR-011 r5).
 	inFn atomic.Int32
+
+	// subsMu guards subs, the live core subscriptions Dropped sums over.
+	subsMu sync.Mutex
+	subs   map[*nats.Subscription]struct{}
 
 	reconnects atomic.Uint64
 	malformed  atomic.Uint64
-	dropped    atomic.Uint64
+	// droppedGone carries the drop counts of cancelled subscriptions,
+	// which stop answering once unsubscribed.
+	droppedGone  atomic.Uint64
+	slowEpisodes atomic.Uint64
 }
 
 var _ bus.Bus = (*Client)(nil)
@@ -75,7 +83,7 @@ func New(cfg Config) (*Client, error) {
 	case cfg.Mode == ModeDurable && cfg.Window <= 0:
 		return nil, errors.New("natsbus: Window must be positive in durable mode")
 	}
-	return &Client{cfg: cfg}, nil
+	return &Client{cfg: cfg, subs: make(map[*nats.Subscription]struct{})}, nil
 }
 
 // Start dials. RetryOnFailedConnect keeps an unreachable server from
@@ -89,7 +97,10 @@ func (c *Client) Start(_ context.Context) error {
 		nats.ReconnectHandler(func(*nats.Conn) { c.reconnects.Add(1) }),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
 			if errors.Is(err, nats.ErrSlowConsumer) {
-				c.dropped.Add(1) // the at-most-once trade, made visible
+				// One episode, not one keep: nats.go raises this on the
+				// transition into the slow state, then stays quiet while
+				// it keeps discarding. Dropped counts the keeps.
+				c.slowEpisodes.Add(1)
 			}
 		}),
 	}
@@ -135,6 +146,9 @@ func (c *Client) Close() error {
 // synchronous acked JetStream publish honoring ctx — a non-nil error is
 // the flusher's to retry, bounded by the ADR-011 r3 intent deadline.
 func (c *Client) Publish(ctx context.Context, id [16]byte, reason byte) error {
+	if c.nc == nil {
+		return errors.New("natsbus: Publish before Start")
+	}
 	payload := encodeKeep(id, reason)
 	if c.cfg.Mode == ModeAtMostOnce {
 		return c.nc.Publish(c.cfg.Subject, payload)
@@ -145,8 +159,10 @@ func (c *Client) Publish(ctx context.Context, id [16]byte, reason byte) error {
 
 // Subscribe registers fn. Core mode subscribes directly; durable mode
 // (the durable task) runs the ensure→ordered-consumer loop. cancel is
-// idempotent; it stops delivery and, when it can do so without
-// deadlocking, waits for in-flight delivery to finish.
+// idempotent and stops new deliveries, but may return while a delivery
+// is still in flight — it does not wait for fn. The hardening tier pins
+// the property that matters, that cancel never deadlocks, including a
+// cancel called from inside fn (ADR-011 r5).
 func (c *Client) Subscribe(fn func(id [16]byte, reason byte)) (func(), error) {
 	if c.nc == nil {
 		return nil, errors.New("natsbus: Subscribe before Start")
@@ -176,9 +192,24 @@ func (c *Client) subscribeCore(fn func(id [16]byte, reason byte)) (func(), error
 	if err != nil {
 		return nil, fmt.Errorf("natsbus: subscribe: %w", err)
 	}
+	c.subsMu.Lock()
+	c.subs[sub] = struct{}{}
+	c.subsMu.Unlock()
+
 	var once sync.Once
 	cancel := func() {
-		once.Do(func() { _ = sub.Unsubscribe() })
+		once.Do(func() {
+			// Latch under the lock Dropped reads, so the count neither
+			// double-counts nor gaps across the handover: sub.Dropped
+			// stops answering once Unsubscribe closes the subscription.
+			c.subsMu.Lock()
+			if n, derr := sub.Dropped(); derr == nil && n > 0 {
+				c.droppedGone.Add(uint64(n))
+			}
+			delete(c.subs, sub)
+			c.subsMu.Unlock()
+			_ = sub.Unsubscribe()
+		})
 	}
 	return cancel, nil
 }
@@ -194,6 +225,23 @@ func (c *Client) Reconnects() uint64 { return c.reconnects.Load() }
 // Malformed counts received payloads the wire codec refused.
 func (c *Client) Malformed() uint64 { return c.malformed.Load() }
 
-// Dropped counts keeps the server discarded for a slow consumer — the
-// at-most-once trade, and always zero in durable mode.
-func (c *Client) Dropped() uint64 { return c.dropped.Load() }
+// Dropped counts keeps discarded client-side, out of a subscription's
+// pending queue, when a subscriber cannot keep up with delivery — the
+// at_most_once trade, and always zero in durable mode. Live
+// subscriptions are summed with the drops latched from cancelled ones.
+func (c *Client) Dropped() uint64 {
+	total := c.droppedGone.Load()
+	c.subsMu.Lock()
+	defer c.subsMu.Unlock()
+	for sub := range c.subs {
+		if n, err := sub.Dropped(); err == nil && n > 0 {
+			total += uint64(n)
+		}
+	}
+	return total
+}
+
+// SlowConsumerEpisodes counts the times a subscription entered the slow
+// state. It is not a keep count — one episode discards as many keeps as
+// it takes the subscriber to catch up, which Dropped reports.
+func (c *Client) SlowConsumerEpisodes() uint64 { return c.slowEpisodes.Load() }

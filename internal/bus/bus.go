@@ -27,8 +27,12 @@ const (
 )
 
 // Bus is the keep-notification transport. Subscribe's fn is invoked on
-// a bus-owned goroutine; cancel is idempotent and waits for that
-// goroutine to stop.
+// a bus-owned goroutine; cancel is idempotent and stops delivery, but an
+// implementation may return from cancel while a delivery is still in
+// flight. That is harmless by contract — keeps are duplicate- and
+// late-tolerant up to W, and the processor hands KeepFromBus an abort
+// channel — so only Loopback's stronger wait-for-the-goroutine behavior
+// is its own, documented there.
 type Bus interface {
 	// Publish broadcasts a keep for id to every subscriber, including
 	// the publisher's own. A non-nil error is the caller's to retry.
