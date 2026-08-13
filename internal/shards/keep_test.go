@@ -136,6 +136,32 @@ func TestKeepWithNoBufferedSpansRecordsDecided(t *testing.T) {
 	waitKept(t, s, 0, 2, 1)
 }
 
+// The same skew through Keep would pin a decided entry past W: the
+// deadline is decide time + W, and the ring evicts from its head in
+// insertion order, so one future-stamped entry holds every later one
+// behind it. The worker clamps the verdict's stamp to its own clock, so
+// the deadline is local-now+W.
+func TestFutureStampedKeepDeadlineClamps(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(10)
+	require.True(t, s.Keep(id, bus.ReasonError, clk.Now().Add(time.Hour)))
+	waitKept(t, s, 1, 0, 0)
+	// The mirror is tick-published and starts at zero, so the eviction
+	// below only means anything once the entry has been seen standing.
+	require.Eventually(t, func() bool { return s.DecidedEntries() == 1 },
+		5*time.Second, time.Millisecond, "the verdict stands as a decided entry")
+
+	clk.Advance(opts.Window + time.Second)
+	require.Eventually(t, func() bool { return s.DecidedEntries() == 0 },
+		5*time.Second, 10*time.Millisecond,
+		"decided eviction runs on decide-time+W from the local clock")
+}
+
 func TestKeepFromBusAborts(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	opts := testOptions(t.TempDir(), clk)
