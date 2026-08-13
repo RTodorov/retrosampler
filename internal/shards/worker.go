@@ -169,10 +169,18 @@ func (sh *shard) handle(s *Set, fb *fragBuf) {
 // and a future keep deadline held its decided entry — and, the ring
 // evicting in insertion order, every entry behind it — past W. One clock
 // read per event, on the worker goroutine and so off the ADR-004 producer
-// path; a no-op whenever producers stamp honestly.
+// path; a no-op whenever producers stamp honestly, and counted when it is
+// not, so upstream skew reads as a number instead of vanishing silently.
+//
+// This closes the INGEST side only. A tMax already on disk can still sit
+// ahead of now — written by a pre-clamp build and recovered on restart
+// replay, or left behind by a local clock stepping backwards — so the
+// buffer-side residual remains a recorded carry-over, and the tick's
+// max(now-tMax, 0) guard stays load-bearing for it.
 func (sh *shard) clampAt(s *Set, fb *fragBuf) {
 	if now := s.opts.Now(); fb.at.After(now) {
 		fb.at = now
+		s.clampedStamps.Add(1)
 	}
 }
 

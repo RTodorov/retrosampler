@@ -211,10 +211,13 @@ func TestEffectiveWindowClampsFutureStampedData(t *testing.T) {
 	assert.GreaterOrEqual(t, s.EffectiveWindow(), time.Duration(0))
 }
 
-// The stage-3 carry-over, closed: a future tMax pinned its segment against
-// BOTH Expire and the watermark rung until real time caught up with the
-// skew. The worker now clamps the stamp to its own clock at append, so a
-// future-stamped fragment ages out on the normal window.
+// The stage-3 carry-over, ingest side closed: a future tMax pinned its
+// segment against BOTH Expire and the watermark rung until real time
+// caught up with the skew. The worker now clamps the stamp to its own
+// clock at append, so a future-stamped fragment ages out on the normal
+// window. The buffer-side residual — a tMax already on disk from a
+// pre-clamp build, or a local clock stepped backwards — stays a recorded
+// carry-over and is not covered here.
 func TestFutureStampedFragmentIsReclaimable(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	opts := testOptions(t.TempDir(), clk)
@@ -226,11 +229,12 @@ func TestFutureStampedFragmentIsReclaimable(t *testing.T) {
 	s := mustNew(t, opts)
 	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
 
+	const offers = 20 // ~5 segments, so finalized ones exist
 	// An hour of skew against a one-minute window: the stamp alone would
 	// hold this data for 61 minutes of local time.
 	future := clk.Now().Add(time.Hour)
 	frag := make([]byte, 1024)
-	for n := range uint64(20) { // ~5 segments, so finalized ones exist
+	for n := range uint64(offers) {
 		require.True(t, s.Offer(testID(n), frag, future))
 	}
 	// Every handoff buffer back in the ring means every offer above has
@@ -240,6 +244,8 @@ func TestFutureStampedFragmentIsReclaimable(t *testing.T) {
 	sh := s.shards[0]
 	require.Eventually(t, func() bool { return len(sh.free) == queueDepth },
 		5*time.Second, time.Millisecond, "every offered fragment is appended")
+	assert.Equal(t, uint64(offers), s.Stats().ClampedStamps,
+		"every skewed fragment is clamped, and each clamp is counted")
 	require.Eventually(t, func() bool { return s.DiskBytesTotal() > 0 },
 		5*time.Second, time.Millisecond, "the tick reports the fragments on disk")
 
