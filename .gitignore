@@ -5,3 +5,4 @@ bench-new.txt
 e2e/out/
 e2e/compose/out/
 docs/superpowers/
+.superpowers/
