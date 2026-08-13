@@ -127,6 +127,21 @@ func TestEvalDivergence(t *testing.T) {
 	assert.Equal(t, int64(6000), d.DivergenceMS())
 }
 
+func TestEvalDivergenceClampedAge(t *testing.T) {
+	// A future T0 clamps age to 0, so the stored divergence must be
+	// 0 − elapsed, not the raw negative age.
+	d := build(t, Config{
+		TraceLatencyThreshold: time.Hour,
+		T0Attribute:           "baggage.t0",
+		ElapsedMSAttribute:    "baggage.elapsed_ms",
+	})
+	rs, ss, sp := span()
+	sp.Attributes().PutInt("baggage.t0", t0.Add(time.Hour).UnixMilli())
+	sp.Attributes().PutInt("baggage.elapsed_ms", 4000)
+	assert.Zero(t, d.Eval(rs, ss, sp, t0))
+	assert.Equal(t, int64(-4000), d.DivergenceMS())
+}
+
 func TestEvalMalformedBaggageCounted(t *testing.T) {
 	d := build(t, Config{
 		TraceLatencyThreshold: time.Second,
@@ -154,4 +169,5 @@ func TestEnabled(t *testing.T) {
 	assert.False(t, build(t, Config{}).Enabled())
 	assert.True(t, build(t, Config{KeepOnError: true}).Enabled())
 	assert.True(t, build(t, Config{SpanLatencyThreshold: time.Second}).Enabled())
+	assert.True(t, build(t, Config{BaselineRate: 0.01}).Enabled())
 }
