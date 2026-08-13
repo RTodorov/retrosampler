@@ -116,6 +116,7 @@ type Stats struct {
 	DuplicateKeeps         uint64
 	CorruptFragments       uint64
 	FlushRetries           uint64
+	ClampedStamps          uint64
 	ExpiredBytes           int64
 }
 
@@ -154,6 +155,7 @@ type Set struct {
 	duplicateKeeps         atomic.Uint64
 	corruptFragments       atomic.Uint64
 	flushRetries           atomic.Uint64
+	clampedStamps          atomic.Uint64
 	expiredBytes           atomic.Int64
 
 	intake atomic.Bool
@@ -454,6 +456,7 @@ func (s *Set) Stats() Stats {
 		DuplicateKeeps:         s.duplicateKeeps.Load(),
 		CorruptFragments:       s.corruptFragments.Load(),
 		FlushRetries:           s.flushRetries.Load(),
+		ClampedStamps:          s.clampedStamps.Load(),
 		ExpiredBytes:           s.expiredBytes.Load(),
 	}
 }

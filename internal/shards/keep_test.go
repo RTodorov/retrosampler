@@ -151,6 +151,8 @@ func TestFutureStampedKeepDeadlineClamps(t *testing.T) {
 	id := testID(10)
 	require.True(t, s.Keep(id, bus.ReasonError, clk.Now().Add(time.Hour)))
 	waitKept(t, s, 1, 0, 0)
+	assert.Equal(t, uint64(1), s.Stats().ClampedStamps,
+		"the skewed verdict is clamped, and the clamp is counted")
 	// The mirror is tick-published and starts at zero, so the eviction
 	// below only means anything once the entry has been seen standing.
 	require.Eventually(t, func() bool { return s.DecidedEntries() == 1 },
