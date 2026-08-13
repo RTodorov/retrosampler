@@ -53,11 +53,12 @@ type shard struct {
 }
 
 // pendReq is parked flush work: need-bits to run when the flush channel
-// has room again, deduped by trace id. deadline bounds NeedPublish only
-// (ADR-011 r3): it is the keep's own deadline, carried through every
-// re-park so retries age against the original decision rather than the
-// latest failure. NeedFlush needs no deadline — expiry empties its
-// Collect.
+// has room again, deduped by trace id. deadline belongs to NeedPublish
+// alone (ADR-011 r3): it is the deciding keep's own deadline, held only
+// while that bit is and carried through every re-park, so retries age
+// against the original decision rather than the latest failure. An entry
+// owing only NeedFlush carries zero — expiry empties its Collect, which
+// needs no deadline to bound it.
 type pendReq struct {
 	reason   byte
 	need     Need
@@ -271,22 +272,31 @@ func (sh *shard) sendJob(s *Set, j *FlushJob) {
 }
 
 // park merges flush work into the pending map: need-bits OR, first
-// nonzero reason wins, and the first deadline holds. An established
-// deadline must never slide (ADR-011 r3) — every re-park deletes and
-// recreates the entry, so a re-stamp here would push the horizon out on
-// each failing cycle and the intent would outlive W forever, which is
-// the unbounded growth the deadline exists to close. The now+W fallback
-// covers the paths that carry none: they owe no publish, so it is inert.
+// nonzero reason wins, and a deadline is installed only by a park that
+// brings NeedPublish (ADR-011 r3). The deadline belongs to the publish
+// intent, not to the entry carrying it — an entry is deduped by trace id
+// and outlives any one intent, so a deadline left on a flush-only entry
+// would be adopted by whatever publish merges in next and could abandon
+// a broadcast that never got an attempt.
+//
+// Within a publish intent the first deadline holds, because every
+// re-park deletes and recreates the entry: re-deriving it from the
+// current clock would push the horizon out by W per cycle and the intent
+// would outlive W forever, which is the unbounded growth the deadline
+// exists to close. The now+W fallback catches a NeedPublish arriving
+// without one, which retryPending would otherwise read as long expired.
 func (sh *shard) park(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
 	req := sh.pend[id]
 	if req.reason == 0 {
 		req.reason = reason
 	}
-	if req.deadline == 0 {
-		req.deadline = deadline
-	}
-	if req.deadline == 0 {
-		req.deadline = s.opts.Now().Add(s.opts.Window).UnixNano()
+	if need&NeedPublish != 0 {
+		if req.deadline == 0 {
+			req.deadline = deadline
+		}
+		if req.deadline == 0 {
+			req.deadline = s.opts.Now().Add(s.opts.Window).UnixNano()
+		}
 	}
 	req.need |= need
 	sh.pend[id] = req
@@ -297,6 +307,8 @@ func (sh *shard) park(s *Set, id [16]byte, reason byte, need Need, deadline int6
 // r3): past W every peer's fragments of that trace have aged out, so the
 // broadcast can no longer cause a flush anywhere and abandoning it loses
 // nothing that still exists. An intent left owing nothing is simply gone.
+// The deadline is cleared with the bit it bounds, so what survives is a
+// plain flush intent carrying no claim about a publish (see park).
 //
 // The keys are snapshotted first because collectAndSend re-parks on a
 // still-full channel, and Go leaves it undefined whether a range revisits
@@ -313,6 +325,7 @@ func (sh *shard) retryPending(s *Set, now int64) {
 		delete(sh.pend, id)
 		if req.need&NeedPublish != 0 && now >= req.deadline {
 			req.need &^= NeedPublish
+			req.deadline = 0
 			s.publishesAbandoned.Add(1)
 		}
 		if req.need == 0 {
