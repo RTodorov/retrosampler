@@ -21,4 +21,9 @@ type FlushJob struct {
 	Reason byte
 	Need   Need
 	Frags  [][]byte
+	// Deadline is the unix-nano instant past which NeedPublish is
+	// abandoned (ADR-011 r3), carried through every retry so the intent
+	// ages against the original decision. Zero means none: a job owing
+	// no publish is bounded by segment expiry instead.
+	Deadline int64
 }

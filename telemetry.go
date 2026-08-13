@@ -185,6 +185,9 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 		tb.RegisterProcessorRetrosamplerPendingFlushesCallback(
 			live((*shards.Set).PendingFlushes),
 		),
+		tb.RegisterProcessorRetrosamplerPendingPublishesAbandonedCallback(
+			stat(func(s shards.Stats) int64 { return asInt64(s.PublishesAbandoned) }),
+		),
 		tb.RegisterProcessorRetrosamplerPolicyEvalErrorsCallback(
 			perPolicy(p.det.PolicyEvalErrors),
 		),

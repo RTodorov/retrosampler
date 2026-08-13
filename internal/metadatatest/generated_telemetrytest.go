@@ -269,6 +269,22 @@ func AssertEqualProcessorRetrosamplerPendingFlushes(t *testing.T, tt *componentt
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
 
+func AssertEqualProcessorRetrosamplerPendingPublishesAbandoned(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.pending.publishes_abandoned",
+		Description: "Parked publish intents dropped past their decided deadline (~keep time + W). Past W no peer fragment survives, so the broadcast could cause nothing (ADR-011 r3). [Development]",
+		Unit:        "{publishes}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.pending.publishes_abandoned")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
 func AssertEqualProcessorRetrosamplerPolicyEvalErrors(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
 	want := metricdata.Metrics{
 		Name:        "otelcol.processor.retrosampler.policy.eval_errors",

@@ -126,7 +126,7 @@ func (fl *flusher) retry(j *shards.FlushJob, need shards.Need) {
 	if fl.set == nil {
 		return
 	}
-	fl.set.Retry(j.ID, j.Reason, need, fl.stopc)
+	fl.set.Retry(j.ID, j.Reason, need, j.Deadline, fl.stopc)
 }
 
 // stop signals the flusher, waits for it under ctx, and reports whether

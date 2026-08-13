@@ -134,6 +134,14 @@ Flush intents parked awaiting retry.
 | ---- | ----------- | ---------- | --------- |
 | {flushes} | Gauge | Int | Development |
 
+### otelcol.processor.retrosampler.pending.publishes_abandoned
+
+Parked publish intents dropped past their decided deadline (~keep time + W). Past W no peer fragment survives, so the broadcast could cause nothing (ADR-011 r3).
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {publishes} | Sum | Int | true | Development |
+
 ### otelcol.processor.retrosampler.policy.eval_errors
 
 OTTL policy evaluations that errored, by policy attribute. Ignore-and-count semantics - the span did not match.

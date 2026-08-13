@@ -199,6 +199,17 @@ telemetry:
         value_type: int
         async: true
 
+    processor.retrosampler.pending.publishes_abandoned:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Parked publish intents dropped past their decided deadline (~keep time + W). Past W no peer fragment survives, so the broadcast could cause nothing (ADR-011 r3).
+      unit: "{publishes}"
+      sum:
+        value_type: int
+        monotonic: true
+        async: true
+
     processor.retrosampler.policy.eval_errors:
       prefix: otelcol.
       enabled: true

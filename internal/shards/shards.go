@@ -116,6 +116,7 @@ type Stats struct {
 	DuplicateKeeps         uint64
 	CorruptFragments       uint64
 	FlushRetries           uint64
+	PublishesAbandoned     uint64
 	ClampedStamps          uint64
 	ExpiredBytes           int64
 }
@@ -131,9 +132,11 @@ type fragBuf struct {
 	kind   eventKind
 	origin Origin
 	reason byte
-	// need is the evRetry work the flusher handed back; unused by the
-	// other kinds.
-	need Need
+	// need is the evRetry work the flusher handed back, and deadline the
+	// publish deadline that work still carries; both unused by the other
+	// kinds.
+	need     Need
+	deadline int64
 }
 
 // Set owns the shard workers and the ladder state shared across them.
@@ -155,6 +158,7 @@ type Set struct {
 	duplicateKeeps         atomic.Uint64
 	corruptFragments       atomic.Uint64
 	flushRetries           atomic.Uint64
+	publishesAbandoned     atomic.Uint64
 	clampedStamps          atomic.Uint64
 	expiredBytes           atomic.Int64
 
@@ -329,7 +333,11 @@ func (s *Set) KeepFromBus(id [16]byte, reason byte, now time.Time, abort <-chan 
 // The worker parks the need-bits and replays them from disk on its next
 // tick, so a retry never carries fragments back across the queue. It also
 // skips the decided check: the trace has already decided.
-func (s *Set) Retry(id [16]byte, reason byte, need Need, abort <-chan struct{}) bool {
+//
+// deadline is the job's own FlushJob.Deadline handed straight back, so a
+// publish that has been failing for a while does not age out any later
+// than one that has just started (ADR-011 r3).
+func (s *Set) Retry(id [16]byte, reason byte, need Need, deadline int64, abort <-chan struct{}) bool {
 	s.inflight.Add(1)
 	defer s.inflight.Add(-1)
 	if !s.intake.Load() {
@@ -346,6 +354,7 @@ func (s *Set) Retry(id [16]byte, reason byte, need Need, abort <-chan struct{}) 
 	fb.id = id
 	fb.reason = reason
 	fb.need = need
+	fb.deadline = deadline
 	fb.data = fb.data[:0]
 	sh.work <- fb
 	return true
@@ -456,6 +465,7 @@ func (s *Set) Stats() Stats {
 		DuplicateKeeps:         s.duplicateKeeps.Load(),
 		CorruptFragments:       s.corruptFragments.Load(),
 		FlushRetries:           s.flushRetries.Load(),
+		PublishesAbandoned:     s.publishesAbandoned.Load(),
 		ClampedStamps:          s.clampedStamps.Load(),
 		ExpiredBytes:           s.expiredBytes.Load(),
 	}

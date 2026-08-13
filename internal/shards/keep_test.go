@@ -329,7 +329,7 @@ func TestKeepAndRetryVsShutdownConservation(t *testing.T) {
 		var keeps, retries atomic.Uint64
 		require.True(t, s.Keep(testID(0), 1, clk.Now()))
 		require.True(t, s.KeepFromBus(testID(1), 1, clk.Now(), wedged))
-		require.True(t, s.Retry(testID(2), 1, NeedFlush, wedged))
+		require.True(t, s.Retry(testID(2), 1, NeedFlush, 0, wedged))
 		keeps.Add(2)
 		retries.Add(1)
 
@@ -354,7 +354,7 @@ func TestKeepAndRetryVsShutdownConservation(t *testing.T) {
 							keeps.Add(1)
 						}
 					default:
-						if s.Retry(id, 1, NeedFlush, wedged) {
+						if s.Retry(id, 1, NeedFlush, 0, wedged) {
 							retries.Add(1)
 						}
 					}

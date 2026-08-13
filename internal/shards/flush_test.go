@@ -103,7 +103,7 @@ func TestDecidedArrivalForwards(t *testing.T) {
 
 	// And the fragment is ALSO on disk: a Retry re-collects it (the
 	// retry parks in pend and replays on the next tick).
-	require.True(t, s.Retry(id, 1, NeedFlush, nil))
+	require.True(t, s.Retry(id, 1, NeedFlush, 0, nil))
 	j2 := recvJob(t, flush)
 	require.Len(t, j2.Frags, 1)
 	assert.Equal(t, "late", string(j2.Frags[0]))
@@ -240,4 +240,135 @@ func TestFullFlushChannelPendsAndTickRetries(t *testing.T) {
 	require.Len(t, j.Frags, 1)
 	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
 		5*time.Second, time.Millisecond)
+}
+
+// A parked NeedPublish past its deadline (~keep time + W) is dropped and
+// counted (ADR-011 r3): past W no peer fragment survives, so the
+// broadcast can cause nothing. NeedFlush needs no deadline — an expired
+// trace's Collect comes back empty and the intent drains (pinned above).
+func TestParkedPublishDroppedPastWindow(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // full channel: the keep's job parks
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(21)
+	require.True(t, s.Keep(id, 1, clk.Now())) // zero-frag keep: publish-only job
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond, "publish intent parked")
+
+	clk.Advance(2 * time.Minute) // past the deadline
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
+		5*time.Second, time.Millisecond, "past-W publish intent dropped")
+	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned, "the drop is counted")
+
+	<-flush // free the channel: nothing may arrive now
+	select {
+	case j := <-flush:
+		t.Fatalf("abandoned intent still produced a job: %+v", j)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// Inside W the parked publish retries and delivers: the deadline must
+// not fire early. That it also does not fire LATE than it should — the
+// re-park keeping the first deadline rather than extending it — needs a
+// clock that moves between re-parks, and is pinned below.
+func TestParkedPublishInsideWindowRetries(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{}
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(22)
+	require.True(t, s.Keep(id, 1, clk.Now()))
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond)
+
+	clk.Advance(30 * time.Second) // half W: still live
+	<-flush
+	j := recvJob(t, flush)
+	assert.Equal(t, id, j.ID)
+	assert.NotZero(t, j.Need&NeedPublish, "inside W the publish survives")
+	assert.Zero(t, s.Stats().PublishesAbandoned)
+}
+
+// The deadline is stamped once and survives every re-park, so a publish
+// failing over and over ages out on schedule (ADR-011 r3). retryPending
+// DELETES the entry before it replays it, so each cycle rebuilds it from
+// scratch: a park that re-derived the deadline from the current clock
+// would push the horizon out by W on every tick and the intent would
+// never expire, which is the unbounded pending map this deadline exists
+// to close.
+//
+// The two tests above cannot see that, and neither can any test whose
+// clock stands still while the intent re-parks — a re-stamp reproduces
+// the same number. So the clock moves in two steps here, and the probe
+// is what makes the first one land: its keep is back-dated so its
+// decided entry expires between the steps, and its eviction is proof
+// that a tick read the intermediate clock (and, under a re-stamping
+// park, would have carried the deadline past the final one). It rides
+// the bus origin so it owes no publish and parks no intent of its own,
+// and it is enqueued first so the decided ring's insertion order stays
+// deadline order.
+func TestParkedPublishDeadlineSurvivesRepark(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // full channel: every cycle re-parks
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Shards = 1 // one pend map, one decided ring
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	probe, id := testID(24), testID(25)
+	require.True(t, s.KeepFromBus(probe, 1, clk.Now().Add(-45*time.Second), nil)) // expires at 1015
+	require.True(t, s.Keep(id, 1, clk.Now()))                                     // deadline 1060
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 && s.DecidedEntries() == 2 },
+		5*time.Second, time.Millisecond, "the publish intent is parked and both keeps are decided")
+
+	clk.Advance(30 * time.Second) // 1030: re-parks now happen at this reading
+	require.Eventually(t, func() bool { return s.DecidedEntries() == 1 },
+		5*time.Second, time.Millisecond, "a tick has run against the intermediate clock")
+
+	clk.Advance(31 * time.Second) // 1061: past the original deadline, short of a re-stamped one
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
+		5*time.Second, time.Millisecond, "the intent ages against its first deadline, not its last failure")
+	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned)
+}
+
+// A keep near the window boundary still flushes: the deadline mechanics
+// must not round a live keep away (spec §9 W-mechanics pin).
+func TestKeepNearWindowBoundaryFlushes(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 16)
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(23)
+	require.True(t, s.Offer(id, []byte("old-but-live"), clk.Now()))
+	clk.Advance(59 * time.Second) // 0.98W later the keep still lands
+	require.True(t, s.KeepFromBus(id, 1, clk.Now(), nil))
+	j := recvJob(t, flush)
+	require.Len(t, j.Frags, 1)
+	assert.Equal(t, "old-but-live", string(j.Frags[0]))
 }
