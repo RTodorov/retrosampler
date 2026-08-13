@@ -352,6 +352,112 @@ func TestParkedPublishDeadlineSurvivesRepark(t *testing.T) {
 	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned)
 }
 
+// The deadline belongs to the publish intent, not to the pend entry it
+// rides in, and the two have different lifetimes: an entry deduped by
+// trace id outlives any one intent, so a deadline left behind on it
+// would be applied to whatever publish arrives next.
+//
+// Here the entry is a flush-only intent wedged by a downstream outage.
+// Its trace is decided from the bus, and back-dated so the decision
+// expires while the fragments are still live — which is what lets the
+// trace be re-detected locally afterwards, on a NEW keep owing a NEW
+// broadcast. Merging that into the waiting entry must install the fresh
+// deadline; adopting the old one, already in the past, abandons a
+// broadcast that never got a single attempt and counts it as aged out.
+func TestStaleFlushEntryCannotAbandonAFreshPublish(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // full channel: the flush intent stays parked
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Shards = 1
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(26)
+	require.True(t, s.Offer(id, []byte("live"), clk.Now()))                    // expires at 1060
+	require.True(t, s.KeepFromBus(id, 1, clk.Now().Add(-50*time.Second), nil)) // decided until 1010
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond, "the flush intent is parked on the wedged channel")
+
+	clk.Advance(15 * time.Second) // 1015: the decision has expired, the fragment has not
+	require.Eventually(t, func() bool { return s.DecidedEntries() == 0 },
+		5*time.Second, time.Millisecond, "the trace can be decided again")
+	require.Equal(t, int64(1), s.PendingFlushes(), "and its flush intent is still waiting")
+
+	require.True(t, s.Keep(id, 1, clk.Now())) // a fresh local keep: deadline 1075
+	// The merge is the whole subject, so the keep has to be handled while
+	// the channel is still full. Every handoff buffer back in the ring is
+	// what says so; unwedging first would let its job go straight out and
+	// the test would pass without ever merging anything.
+	sh := s.shards[0]
+	require.Eventually(t, func() bool { return len(sh.free) == queueDepth },
+		5*time.Second, time.Millisecond, "the fresh keep is parked, not sent")
+
+	<-flush // unwedge: the merged intent goes out
+	j := recvJob(t, flush)
+	assert.NotZero(t, j.Need&NeedPublish, "the fresh broadcast survives the merge")
+	assert.Zero(t, s.Stats().PublishesAbandoned, "nothing here is past its deadline")
+}
+
+// Abandonment is the other way an entry outlives its publish intent: the
+// flush half survives it. Stripping the bit clears the deadline with it,
+// so what remains states what it is — a plain flush intent, Deadline 0,
+// as FlushJob documents — rather than a job announcing a publish horizon
+// it no longer owes to a flusher that hands the value back through the
+// public Retry. The trace can then be re-detected once its decision ages
+// out and broadcast again on its own fresh deadline.
+//
+// The fragment lands late in the window on purpose: the entry has to
+// survive the abandonment tick, which it does only while its Collect
+// still returns something.
+func TestAbandonedIntentDoesNotPoisonTheNextPublish(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // full channel throughout: every intent parks
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Shards = 1
+	opts.Window = time.Minute
+	opts.WindowFloor = time.Second
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(27)
+	require.True(t, s.Keep(id, 1, clk.Now())) // decided until 1060, publish deadline 1060
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond)
+
+	clk.Advance(50 * time.Second)
+	require.True(t, s.Offer(id, []byte("late"), clk.Now())) // still collectable at 1061
+
+	clk.Advance(11 * time.Second) // 1061: the publish ages out, the decision with it
+	require.Eventually(t, func() bool {
+		return s.Stats().PublishesAbandoned == 1 && s.DecidedEntries() == 0
+	}, 5*time.Second, time.Millisecond, "the first publish is abandoned on schedule")
+	require.Equal(t, int64(1), s.PendingFlushes(), "its flush half is still parked")
+
+	<-flush // let the remainder through
+	j := recvJob(t, flush)
+	assert.Equal(t, NeedFlush, j.Need, "only the flush half survived")
+	assert.Zero(t, j.Deadline, "and it carries no deadline for a publish it no longer owes")
+
+	flush <- &FlushJob{} // wedge again, so the re-detection has to park
+	require.True(t, s.Keep(id, 1, clk.Now()))
+	sh := s.shards[0]
+	require.Eventually(t, func() bool { return len(sh.free) == queueDepth },
+		5*time.Second, time.Millisecond, "the second keep is parked, not sent")
+
+	<-flush
+	j2 := recvJob(t, flush)
+	assert.NotZero(t, j2.Need&NeedPublish, "the second broadcast is not the first one's to abandon")
+	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned, "and it is not counted as aged out")
+}
+
 // A keep near the window boundary still flushes: the deadline mechanics
 // must not round a live keep away (spec §9 W-mechanics pin).
 func TestKeepNearWindowBoundaryFlushes(t *testing.T) {
