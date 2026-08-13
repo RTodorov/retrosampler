@@ -31,11 +31,13 @@ func NewFactory() processor.Factory {
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		Window:       5 * time.Minute,
-		SegmentSize:  32 << 20,
-		WatermarkPct: 80,
-		WindowFloor:  time.Minute,
-		KeepOnError:  true,
+		Window:             5 * time.Minute,
+		SegmentSize:        32 << 20,
+		WatermarkPct:       80,
+		WindowFloor:        time.Minute,
+		KeepOnError:        true,
+		T0Attribute:        "baggage.t0",
+		ElapsedMSAttribute: "baggage.elapsed_ms",
 	}
 }
 

@@ -6,6 +6,8 @@ package retrosampler
 import (
 	"errors"
 	"time"
+
+	"github.com/rtodorov/retrosampler/internal/detect"
 )
 
 // Config defines configuration for the retrosampler processor.
@@ -42,6 +44,48 @@ type Config struct {
 	// the keep-on-error built-in (ADR-009), evaluated per span at
 	// ingest, guaranteed alloc-free. Default true.
 	KeepOnError bool `mapstructure:"keep_on_error"`
+	// SpanLatencyThreshold keeps any trace containing a span longer than
+	// this. 0 disables. Guaranteed alloc-free — for span latency, use
+	// this setting, never an OTTL arithmetic expression (ADR-008).
+	SpanLatencyThreshold time.Duration `mapstructure:"span_latency_threshold"`
+	// TraceLatencyThreshold keeps a trace whose accumulated baggage
+	// elapsed_ms exceeds it. 0 disables. Skew-free, blind to inter-hop
+	// gaps (ADR-008 r1).
+	TraceLatencyThreshold time.Duration `mapstructure:"trace_latency_threshold"`
+	// TraceAgeThreshold keeps a trace older than now−T0 (baggage). 0
+	// disables. Catches queue-wait latency; wall-clock skew accepted.
+	TraceAgeThreshold time.Duration `mapstructure:"trace_age_threshold"`
+	// BaselineRate is the deterministic head-sample fraction in [0, 1];
+	// identical verdict on every instance, never broadcast. 0 disables.
+	BaselineRate float64 `mapstructure:"baseline_rate"`
+	// Policies are named OTTL span conditions, OR-composed: any match
+	// keeps the whole trace. ~30–110 ns and 0–3 allocs per span per
+	// condition, expression-shape-dependent — never guaranteed
+	// alloc-free (ADR-008 r2).
+	Policies []PolicyConfig `mapstructure:"policies"`
+	// T0Attribute is the span attribute carrying baggage T0 as unix
+	// epoch milliseconds (int or decimal string).
+	T0Attribute string `mapstructure:"t0_attribute"`
+	// ElapsedMSAttribute is the span attribute carrying baggage
+	// elapsed_ms (int or decimal string).
+	ElapsedMSAttribute string `mapstructure:"elapsed_ms_attribute"`
+}
+
+// PolicyConfig is one named OTTL span condition. Names must be unique
+// and non-empty: they key the per-policy telemetry attribution.
+type PolicyConfig struct {
+	Name      string `mapstructure:"name"`
+	Condition string `mapstructure:"condition"`
+}
+
+// policyList maps the config surface onto detect's policy type, in
+// config order — which is evaluation order and telemetry index order.
+func policyList(ps []PolicyConfig) []detect.Policy {
+	out := make([]detect.Policy, len(ps))
+	for i, p := range ps {
+		out[i] = detect.Policy{Name: p.Name, Condition: p.Condition}
+	}
+	return out
 }
 
 // Validate checks that the configuration is usable.
@@ -73,5 +117,25 @@ func (cfg *Config) Validate() error {
 	if cfg.WindowFloor <= 0 || cfg.WindowFloor >= cfg.Window {
 		return errors.New("window_floor must be positive and below window")
 	}
-	return nil
+	if cfg.SpanLatencyThreshold < 0 {
+		return errors.New("span_latency_threshold must be non-negative (0 disables)")
+	}
+	if cfg.TraceLatencyThreshold < 0 {
+		return errors.New("trace_latency_threshold must be non-negative (0 disables)")
+	}
+	if cfg.TraceAgeThreshold < 0 {
+		return errors.New("trace_age_threshold must be non-negative (0 disables)")
+	}
+	// This bound is the only guard: out of range, the rate reaches an
+	// architecture-dependent float64->uint64 conversion in detect.Build.
+	if cfg.BaselineRate < 0 || cfg.BaselineRate > 1 {
+		return errors.New("baseline_rate must be in [0, 1] (a negative rate keeps 100% of traffic on amd64)")
+	}
+	if cfg.TraceAgeThreshold > 0 && cfg.T0Attribute == "" {
+		return errors.New("t0_attribute is required when trace_age_threshold is set")
+	}
+	if cfg.TraceLatencyThreshold > 0 && cfg.ElapsedMSAttribute == "" {
+		return errors.New("elapsed_ms_attribute is required when trace_latency_threshold is set")
+	}
+	return detect.CheckPolicies(policyList(cfg.Policies))
 }
