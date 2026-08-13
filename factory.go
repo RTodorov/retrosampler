@@ -46,7 +46,10 @@ func createTraces(ctx context.Context, set processor.Settings,
 ) (processor.Traces, error) {
 	// The Loopback is the single-instance default: local keeps drive the
 	// whole decide->flush loop with no infrastructure (ADR-008 r6).
-	p := newProcessor(cfg.(*Config), set.Logger, systemClock, bus.NewLoopback())
+	p, err := newProcessor(cfg.(*Config), set.TelemetrySettings, systemClock, bus.NewLoopback())
+	if err != nil {
+		return nil, err
+	}
 	// next reaches the processor here rather than through newProcessor:
 	// the factory receives the consumer separately from the config.
 	p.next = next

@@ -80,6 +80,11 @@ func Build(cfg Config, set component.TelemetrySettings) (*Detector, error) {
 		elapsedKey:  cfg.ElapsedMSAttribute,
 		logger:      set.Logger,
 	}
+	// A zero-valued TelemetrySettings would otherwise leave the warn call
+	// in evalPolicies one nil dereference from panicking on the hot path.
+	if d.logger == nil {
+		d.logger = zap.NewNop()
+	}
 	// A negative threshold is nonsense config; leaving the field zero
 	// compiles the condition out, same as the zero value.
 	if ns := cfg.SpanLatencyThreshold.Nanoseconds(); ns > 0 {

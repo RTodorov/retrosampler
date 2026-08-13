@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -170,4 +171,19 @@ func TestEnabled(t *testing.T) {
 	assert.True(t, build(t, Config{KeepOnError: true}).Enabled())
 	assert.True(t, build(t, Config{SpanLatencyThreshold: time.Second}).Enabled())
 	assert.True(t, build(t, Config{BaselineRate: 0.01}).Enabled())
+}
+
+// Zero-valued settings must still leave a usable logger. The OTTL parser
+// rejects a nil logger outright, so today the policy path cannot reach
+// Eval that way — but every other condition can, and the warn call in
+// evalPolicies is the kind of hot-path panic a caller should not have to
+// know to avoid.
+func TestBuildToleratesZeroSettings(t *testing.T) {
+	d, err := Build(Config{KeepOnError: true}, component.TelemetrySettings{})
+	require.NoError(t, err)
+	require.NotNil(t, d.logger)
+	rs, ss, sp := span()
+	sp.Status().SetCode(ptrace.StatusCodeError)
+	assert.Equal(t, bus.ReasonError, d.Eval(rs, ss, sp, t0))
+	d.logger.Warn("a nil logger would panic here")
 }
