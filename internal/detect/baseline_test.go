@@ -5,6 +5,7 @@ package detect
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,23 @@ func idWithTail(tail uint64) pcommon.TraceID {
 func TestBaselineDisabledAtZeroRate(t *testing.T) {
 	d := build(t, Config{})
 	assert.False(t, d.Baseline(idWithTail(0)), "rate 0 keeps nothing, even tail 0")
+}
+
+func TestBaselineDisabledAtInvalidRate(t *testing.T) {
+	// Build's `> 0` guard is what keeps a nonsense rate away from the
+	// out-of-range float→uint64 conversion, whose result is
+	// implementation-defined.
+	for _, rate := range []float64{-1, math.NaN()} {
+		d := build(t, Config{BaselineRate: rate})
+		assert.False(t, d.Baseline(idWithTail(0)), "rate %v keeps nothing, even tail 0", rate)
+	}
+}
+
+func TestBaselineMasksLeadingBits(t *testing.T) {
+	d := build(t, Config{BaselineRate: 0.5})
+	id := idWithTail(0)
+	id[8] = 0xFF
+	assert.True(t, d.Baseline(id), "byte 8's leading bits never reach the compare")
 }
 
 func TestBaselineBoundaryExact(t *testing.T) {
