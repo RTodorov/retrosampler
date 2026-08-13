@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +66,60 @@ func TestMalformedCountedAndDropped(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	assert.Zero(t, c.Dropped(), "an undecodable payload is malformed, not a slow-consumer drop")
+}
+
+func TestDroppedCountsKeepsNotEpisodesAndSurvivesCancel(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c := newCoreClient(t, ns.ClientURL())
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	releaseFn := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseFn)
+	cancel, err := c.Subscribe(func([16]byte, byte) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	})
+	require.NoError(t, err)
+
+	pub, err := nats.Connect(ns.ClientURL())
+	require.NoError(t, err)
+	defer pub.Close()
+
+	// Wedge the subscriber inside fn so nothing drains its pending queue.
+	require.NoError(t, pub.Publish("test.keeps", make([]byte, 17)))
+	require.NoError(t, pub.Flush())
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("subscriber never entered fn")
+	}
+
+	// Overrun the pending queue's 64MB byte budget with big payloads,
+	// which costs far less than the 500k messages its message budget
+	// would need. These decode as malformed and never reach fn; the drop
+	// happens upstream of the codec, in nats.go's pending queue.
+	big := make([]byte, 512*1024)
+	for range 200 {
+		require.NoError(t, pub.Publish("test.keeps", big))
+	}
+	require.NoError(t, pub.Flush())
+
+	require.Eventually(t,
+		func() bool { return c.Dropped() > 0 && c.SlowConsumerEpisodes() > 0 },
+		30*time.Second, 10*time.Millisecond, "the pending queue must overflow")
+
+	dropped, episodes := c.Dropped(), c.SlowConsumerEpisodes()
+	require.Greater(t, dropped, episodes,
+		"Dropped must count discarded keeps, not slow-consumer episodes")
+
+	releaseFn()
+	cancel()
+	assert.GreaterOrEqual(t, c.Dropped(), dropped,
+		"a cancelled subscriber's drops must not vanish from the total")
 }
 
 func TestNewValidatesConfig(t *testing.T) {
@@ -162,6 +217,22 @@ func TestSubscribeAfterCloseFails(t *testing.T) {
 	require.ErrorContains(t, err, "natsbus: subscribe:")
 	require.ErrorIs(t, err, nats.ErrConnectionClosed)
 	assert.Nil(t, cancel)
+}
+
+func TestPublishBeforeStartFails(t *testing.T) {
+	// Durable mode would otherwise call a method on a nil jetstream
+	// interface and panic, which ADR-001 r12 bans outside main.
+	for _, mode := range []string{natsbus.ModeAtMostOnce, natsbus.ModeDurable} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := coreConfig("nats://127.0.0.1:4222")
+			cfg.Mode = mode
+			c, err := natsbus.New(cfg)
+			require.NoError(t, err)
+			require.ErrorContains(t,
+				c.Publish(context.Background(), [16]byte{1}, bus.ReasonError),
+				"Publish before Start")
+		})
+	}
 }
 
 func TestCloseBeforeStartIsNil(t *testing.T) {

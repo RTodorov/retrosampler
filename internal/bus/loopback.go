@@ -65,7 +65,11 @@ func (l *Loopback) Publish(_ context.Context, id [16]byte, reason byte) error {
 	return nil
 }
 
-// Subscribe registers fn and starts its delivery goroutine.
+// Subscribe registers fn and starts its delivery goroutine. Loopback's
+// cancel is stronger than the Bus contract requires: it waits for that
+// goroutine to stop, so no delivery is in flight once it returns. The
+// cost is that a cancel called from inside fn deadlocks — in-process,
+// the only caller is the processor's shutdown path, which does not.
 func (l *Loopback) Subscribe(fn func(id [16]byte, reason byte)) (func(), error) {
 	s := &subscriber{
 		ch:   make(chan keepMsg, loopbackDepth),
