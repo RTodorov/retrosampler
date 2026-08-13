@@ -14,6 +14,22 @@ Fragment appends that failed against the shard buffer.
 | ---- | ----------- | ---------- | --------- | --------- |
 | {fragments} | Sum | Int | true | Development |
 
+### otelcol.processor.retrosampler.baggage.divergence_ms
+
+Last observed (now - T0) - elapsed_ms divergence. Large values mean clock skew or a baggage propagation gap (ADR-003 rule 5).
+
+| Unit | Metric Type | Value Type | Stability |
+| ---- | ----------- | ---------- | --------- |
+| ms | Gauge | Int | Development |
+
+### otelcol.processor.retrosampler.baggage.malformed
+
+Baggage attributes present but unusable - wrong type, bad grammar, or overflow. Instrumentation misconfiguration, not a propagation gap.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {values} | Sum | Int | true | Development |
+
 ### otelcol.processor.retrosampler.corrupt.fragments
 
 Fragment skip events - corrupt length or CRC mismatch at Collect, plus decode failures at flush. Events, not distinct fragments - a retried tick re-counts the same bad bytes on disk.
@@ -29,6 +45,14 @@ Live decided-set entries across shards.
 | Unit | Metric Type | Value Type | Stability |
 | ---- | ----------- | ---------- | --------- |
 | {traces} | Gauge | Int | Development |
+
+### otelcol.processor.retrosampler.detected.keeps
+
+Keep verdicts produced by local detection, by reason attribute - raw detection events, before decided-set dedup.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {keeps} | Sum | Int | true | Development |
 
 ### otelcol.processor.retrosampler.duplicate.keeps
 
@@ -110,6 +134,22 @@ Flush intents parked awaiting retry.
 | ---- | ----------- | ---------- | --------- |
 | {flushes} | Gauge | Int | Development |
 
+### otelcol.processor.retrosampler.policy.eval_errors
+
+OTTL policy evaluations that errored, by policy attribute. Ignore-and-count semantics - the span did not match.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {evaluations} | Sum | Int | true | Development |
+
+### otelcol.processor.retrosampler.policy.matches
+
+OTTL policy matches, by policy attribute.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {matches} | Sum | Int | true | Development |
+
 ### otelcol.processor.retrosampler.publish.errors
 
 Keep verdicts the bus refused. Each one re-parks the publish need-bit for retry.
@@ -149,3 +189,11 @@ Ingest events refused because the shard queue had no free buffer. Counts refused
 | Unit | Metric Type | Value Type | Monotonic | Stability |
 | ---- | ----------- | ---------- | --------- | --------- |
 | {fragments} | Sum | Int | true | Development |
+
+### otelcol.processor.retrosampler.skew.clamped
+
+Negative durations clamped to zero (ADR-008 rule 7) - span end before start, T0 ahead of the local clock, negative elapsed_ms.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {clamps} | Sum | Int | true | Development |

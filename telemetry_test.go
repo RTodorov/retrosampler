@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
 
@@ -33,10 +34,19 @@ const metricPrefix = "otelcol.processor.retrosampler."
 // instrument whose callback is missing reports no data point at all, so
 // comparing this list against a live collection is what proves each
 // declared instrument was actually bound.
+//
+// The attributed instruments observe one point per non-zero counter and
+// nothing while every counter under them is zero, so only a run that has
+// fired a keep, a policy match AND a policy eval error reports the whole
+// list. TestTelemetryAttributesDetectionByReasonAndPolicy is that run;
+// the narrower scenarios subtract with exceptPerPolicy.
 var wantInstruments = []string{
 	metricPrefix + "append.errors",
+	metricPrefix + "baggage.divergence_ms",
+	metricPrefix + "baggage.malformed",
 	metricPrefix + "corrupt.fragments",
 	metricPrefix + "decided.entries",
+	metricPrefix + "detected.keeps",
 	metricPrefix + "duplicate.keeps",
 	metricPrefix + "early_expired.segments",
 	metricPrefix + "effective_window.seconds",
@@ -47,11 +57,23 @@ var wantInstruments = []string{
 	metricPrefix + "kept.bus",
 	metricPrefix + "kept.local",
 	metricPrefix + "pending.flushes",
+	metricPrefix + "policy.eval_errors",
+	metricPrefix + "policy.matches",
 	metricPrefix + "publish.errors",
 	metricPrefix + "published.keeps",
 	metricPrefix + "shed.floor_protected",
 	metricPrefix + "shed.nothing_reclaimable",
 	metricPrefix + "shed.queue_full",
+	metricPrefix + "skew.clamped",
+}
+
+// exceptPerPolicy drops the per-policy instruments, which carry one
+// series per configured policy and so report nothing whatsoever under a
+// config that declares none.
+func exceptPerPolicy(names []string) []string {
+	return slices.DeleteFunc(slices.Clone(names), func(n string) bool {
+		return strings.HasPrefix(n, metricPrefix+"policy.")
+	})
 }
 
 // metricInt64 reads the single data point of an int64 sum or gauge and
@@ -151,7 +173,7 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 		return ok && v == 1
 	}, 5*time.Second, 10*time.Millisecond, "the decided-set mirror is published on the tick")
 
-	assert.Equal(t, wantInstruments, reportedInstruments(t, tt),
+	assert.Equal(t, exceptPerPolicy(wantInstruments), reportedInstruments(t, tt),
 		"every declared instrument must be bound to a callback")
 
 	// Exact rows go through the generated asserts, which pin unit,
@@ -178,6 +200,135 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 		"an unshrunk window reports the configured retention")
 	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"pending.flushes"),
 		"the flush succeeded, so nothing is parked")
+}
+
+// Detection reports attributed, never as one flat count: which reason
+// fired, and which named policy matched. An operator who cannot tell an
+// error keep from a baseline keep cannot tell a broken service from a
+// sampling rate.
+//
+// Two semantics the instrument descriptions do not carry:
+//
+//   - detected.keeps counts RAW verdict production, before the decided
+//     set dedups. A baseline-selected trace that also trips a reason
+//     counts under BOTH, so the sum over reasons leads kept.local rather
+//     than matching it.
+//   - duplicate.keeps at steady state is dominated by benign baseline
+//     re-enqueues: every batch of an already-decided baseline trace
+//     re-offers the verdict, and the decided set absorbs it.
+//
+// Every counter here moves inside ConsumeTraces — detection runs at
+// ingest — so the collection needs no settling.
+func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
+	tt := newTestTelemetry(t)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 2
+	// The clamp lives inside the span-latency built-in, so the condition
+	// has to be on for a negative duration to reach it. The threshold
+	// itself is out of reach of every span below.
+	cfg.SpanLatencyThreshold = time.Hour
+	cfg.Policies = []PolicyConfig{
+		// Int() over a map-valued attribute errs at EVAL time, which is
+		// the ignore-and-count path; a non-numeric string would be a
+		// silent no-match instead.
+		{Name: "hops", Condition: `Int(span.attributes["hops"]) > 5`},
+		{Name: "tagged", Condition: `span.attributes["keep"] == "yes"`},
+	}
+	sink := new(consumertest.TracesSink)
+	ctx := context.Background()
+	p, err := NewFactory().CreateTraces(ctx, metadatatest.NewSettings(tt), cfg, sink)
+	require.NoError(t, err)
+	require.NoError(t, p.Start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.Shutdown(ctx)) }()
+
+	require.NoError(t, p.ConsumeTraces(ctx, errorSpanBatch(pcommon.TraceID{0xE1}, "boom")))
+	require.NoError(t, p.ConsumeTraces(ctx, singleSpanTrace(pcommon.TraceID{0xE2}, func(sp ptrace.Span) {
+		sp.Attributes().PutEmptyMap("hops").PutStr("k", "v")
+		sp.Attributes().PutStr("keep", "yes")
+	})))
+	require.NoError(t, p.ConsumeTraces(ctx, singleSpanTrace(pcommon.TraceID{0xE3}, func(sp ptrace.Span) {
+		sp.SetStartTimestamp(pcommon.NewTimestampFromTime(baseTime))
+		sp.SetEndTimestamp(pcommon.NewTimestampFromTime(baseTime.Add(-time.Second)))
+	})))
+
+	assert.Equal(t, wantInstruments, reportedInstruments(t, tt),
+		"every declared instrument must be bound to a callback")
+
+	// Exact rows, so these also pin what is NOT reported: the four
+	// reasons nobody reached and the policy that only ever errored are
+	// absent, not zero. A permanent zero series is cardinality that
+	// tells an operator nothing.
+	reason := func(v string) attribute.Set { return attribute.NewSet(attribute.String("reason", v)) }
+	policy := func(v string) attribute.Set { return attribute.NewSet(attribute.String("policy", v)) }
+	metadatatest.AssertEqualProcessorRetrosamplerDetectedKeeps(t, tt,
+		[]metricdata.DataPoint[int64]{
+			{Attributes: reason("error"), Value: 1},
+			{Attributes: reason("policy"), Value: 1},
+		}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualProcessorRetrosamplerPolicyMatches(t, tt,
+		[]metricdata.DataPoint[int64]{{Attributes: policy("tagged"), Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualProcessorRetrosamplerPolicyEvalErrors(t, tt,
+		[]metricdata.DataPoint[int64]{{Attributes: policy("hops"), Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+
+	assert.Equal(t, int64(1), requireMetricInt64(t, tt, metricPrefix+"skew.clamped"),
+		"the end-before-start span clamped once")
+	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"baggage.malformed"),
+		"no baggage condition is configured, so nothing was parsed")
+	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"baggage.divergence_ms"),
+		"divergence needs both baggage keys and reports its zero until then")
+}
+
+// The baggage pair is the propagation health signal (ADR-003 r5) and
+// the two halves fail in opposite directions: malformed counts
+// attributes that are present but unusable, divergence reports how far
+// (now-T0) has drifted from the accumulated elapsed_ms. Both read zero
+// on a pipeline carrying no baggage at all, so a zero proves nothing
+// about which counter a callback is actually wired to — each is driven
+// non-zero here instead.
+func TestTelemetryReportsBaggageHealth(t *testing.T) {
+	tt := newTestTelemetry(t)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 1
+	// Baggage is read only while a baggage condition is on. Both are set
+	// an hour out, so the reads happen and neither keeps.
+	cfg.TraceAgeThreshold = time.Hour
+	cfg.TraceLatencyThreshold = time.Hour
+	ctx := context.Background()
+	// Divergence is measured against the processor's own clock, so the
+	// clock is frozen and the expected value is exact rather than a
+	// tolerance around wall time.
+	clk := newFakeProcClock(baseTime)
+	p, err := newProcessor(cfg, tt.NewTelemetrySettings(), clk.Now, bus.NewLoopback())
+	require.NoError(t, err)
+	p.next = new(consumertest.TracesSink)
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(ctx)) }()
+
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xBA}, func(sp ptrace.Span) {
+		sp.Attributes().PutBool(cfg.T0Attribute, true)
+	}))
+	// 5s of trace age against 1s of accumulated work: 4s unaccounted for,
+	// which is the gap the divergence gauge exists to show.
+	consumeAccepted(t, p, singleSpanTrace(pcommon.TraceID{0xBB}, func(sp ptrace.Span) {
+		sp.Attributes().PutInt(cfg.T0Attribute, baseTime.Add(-5*time.Second).UnixMilli())
+		sp.Attributes().PutInt(cfg.ElapsedMSAttribute, 1000)
+	}))
+
+	assert.Equal(t, int64(1), requireMetricInt64(t, tt, metricPrefix+"baggage.malformed"),
+		"the bool-valued T0 is present but unusable")
+	assert.Equal(t, int64(4000), requireMetricInt64(t, tt, metricPrefix+"baggage.divergence_ms"),
+		"divergence is trace age minus accumulated elapsed_ms")
+	assert.Zero(t, requireMetricInt64(t, tt, metricPrefix+"skew.clamped"),
+		"nothing here runs backwards")
+	_, ok := metricInt64(tt, metricPrefix+"detected.keeps")
+	assert.False(t, ok, "no verdict fired, so the instrument stays off the wire entirely")
 }
 
 // A refused Publish is the least observable failure in the flusher: the

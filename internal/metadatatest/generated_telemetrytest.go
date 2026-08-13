@@ -37,6 +37,36 @@ func AssertEqualProcessorRetrosamplerAppendErrors(t *testing.T, tt *componenttes
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
 
+func AssertEqualProcessorRetrosamplerBaggageDivergenceMs(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.baggage.divergence_ms",
+		Description: "Last observed (now - T0) - elapsed_ms divergence. Large values mean clock skew or a baggage propagation gap (ADR-003 rule 5). [Development]",
+		Unit:        "ms",
+		Data: metricdata.Gauge[int64]{
+			DataPoints: dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.baggage.divergence_ms")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerBaggageMalformed(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.baggage.malformed",
+		Description: "Baggage attributes present but unusable - wrong type, bad grammar, or overflow. Instrumentation misconfiguration, not a propagation gap. [Development]",
+		Unit:        "{values}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.baggage.malformed")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
 func AssertEqualProcessorRetrosamplerCorruptFragments(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
 	want := metricdata.Metrics{
 		Name:        "otelcol.processor.retrosampler.corrupt.fragments",
@@ -63,6 +93,22 @@ func AssertEqualProcessorRetrosamplerDecidedEntries(t *testing.T, tt *componentt
 		},
 	}
 	got, err := tt.GetMetric("otelcol.processor.retrosampler.decided.entries")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerDetectedKeeps(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.detected.keeps",
+		Description: "Keep verdicts produced by local detection, by reason attribute - raw detection events, before decided-set dedup. [Development]",
+		Unit:        "{keeps}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.detected.keeps")
 	require.NoError(t, err)
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
@@ -223,6 +269,38 @@ func AssertEqualProcessorRetrosamplerPendingFlushes(t *testing.T, tt *componentt
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
 
+func AssertEqualProcessorRetrosamplerPolicyEvalErrors(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.policy.eval_errors",
+		Description: "OTTL policy evaluations that errored, by policy attribute. Ignore-and-count semantics - the span did not match. [Development]",
+		Unit:        "{evaluations}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.policy.eval_errors")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerPolicyMatches(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.policy.matches",
+		Description: "OTTL policy matches, by policy attribute. [Development]",
+		Unit:        "{matches}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.policy.matches")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
 func AssertEqualProcessorRetrosamplerPublishErrors(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
 	want := metricdata.Metrics{
 		Name:        "otelcol.processor.retrosampler.publish.errors",
@@ -299,6 +377,22 @@ func AssertEqualProcessorRetrosamplerShedQueueFull(t *testing.T, tt *componentte
 		},
 	}
 	got, err := tt.GetMetric("otelcol.processor.retrosampler.shed.queue_full")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerSkewClamped(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.skew.clamped",
+		Description: "Negative durations clamped to zero (ADR-008 rule 7) - span end before start, T0 ahead of the local clock, negative elapsed_ms. [Development]",
+		Unit:        "{clamps}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.skew.clamped")
 	require.NoError(t, err)
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
