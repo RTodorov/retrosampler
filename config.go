@@ -70,6 +70,70 @@ type Config struct {
 	// ElapsedMSAttribute is the span attribute carrying baggage
 	// elapsed_ms (int or decimal string).
 	ElapsedMSAttribute string `mapstructure:"elapsed_ms_attribute"`
+	// Bus selects the keep-notification transport. Absent means the
+	// in-process Loopback (single-instance mode, ADR-009 r4). The block
+	// is discriminated by Type so a future backend is additive, never a
+	// breaking change (ADR-011 r1).
+	Bus *BusConfig `mapstructure:"bus"`
+}
+
+// BusConfig is the discriminated bus block. Type names the backend;
+// exactly the matching sub-block must be set.
+type BusConfig struct {
+	// Type is the backend: "nats" is the only value this stage.
+	Type string `mapstructure:"type"`
+	// NATS configures the NATS client (required when type is "nats").
+	NATS *NATSConfig `mapstructure:"nats"`
+}
+
+// NATSConfig configures the natsbus client (ADR-011 r1-r2).
+type NATSConfig struct {
+	// URL is the NATS server address, e.g. nats://host:4222. TLS rides
+	// the scheme (tls://); auth rides URL userinfo or CredsFile.
+	URL string `mapstructure:"url"`
+	// Mode is the ADR-008 r6 operator choice: "durable" (JetStream,
+	// default — reconnects replay missed keeps) or "at_most_once"
+	// (core pub/sub — a reconnect gap silently loses fragments of kept
+	// traces; counted, documented trade).
+	Mode string `mapstructure:"mode"`
+	// Subject is the keep broadcast subject.
+	Subject string `mapstructure:"subject"`
+	// Stream is the JetStream stream name (durable mode only).
+	Stream string `mapstructure:"stream"`
+	// CredsFile is an optional NATS credentials file path.
+	CredsFile string `mapstructure:"creds_file"`
+}
+
+const (
+	busModeDurable    = "durable"
+	busModeAtMostOnce = "at_most_once"
+)
+
+// withDefaults fills the optional fields; URL stays required.
+func (n *NATSConfig) withDefaults() NATSConfig {
+	out := *n
+	if out.Mode == "" {
+		out.Mode = busModeDurable
+	}
+	if out.Subject == "" {
+		out.Subject = "retrosampler.keeps"
+	}
+	if out.Stream == "" {
+		out.Stream = "retrosampler-keeps"
+	}
+	return out
+}
+
+// validBusToken refuses NATS wildcard/space characters in a subject or
+// stream name; empty is allowed (defaults fill it).
+func validBusToken(s string) bool {
+	for _, r := range s {
+		switch r {
+		case '*', '>', ' ', '\t':
+			return false
+		}
+	}
+	return true
 }
 
 // PolicyConfig is one named OTTL span condition. Names must be unique
@@ -140,6 +204,27 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.TraceLatencyThreshold > 0 && cfg.ElapsedMSAttribute == "" {
 		return errors.New("elapsed_ms_attribute is required when trace_latency_threshold is set")
+	}
+	if cfg.Bus != nil {
+		if cfg.Bus.Type != "nats" {
+			return fmt.Errorf("bus.type %q is not supported (this stage: nats; ADR-011 r1)", cfg.Bus.Type)
+		}
+		if cfg.Bus.NATS == nil {
+			return errors.New("bus.nats is required when bus.type is nats")
+		}
+		n := cfg.Bus.NATS
+		if n.URL == "" {
+			return errors.New("bus.nats.url is required")
+		}
+		if n.Mode != "" && n.Mode != busModeDurable && n.Mode != busModeAtMostOnce {
+			return fmt.Errorf("bus.nats.mode %q must be %q or %q", n.Mode, busModeDurable, busModeAtMostOnce)
+		}
+		if !validBusToken(n.Subject) {
+			return errors.New("bus.nats.subject must not contain wildcards or spaces")
+		}
+		if !validBusToken(n.Stream) {
+			return errors.New("bus.nats.stream must not contain wildcards or spaces")
+		}
 	}
 	if err := detect.CheckPolicies(policyList(cfg.Policies)); err != nil {
 		return fmt.Errorf("policies: %w", err)

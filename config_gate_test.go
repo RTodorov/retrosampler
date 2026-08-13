@@ -44,6 +44,16 @@ func fullSurface() map[string]any {
 		}},
 		"t0_attribute":         "ctx.t0",
 		"elapsed_ms_attribute": "ctx.elapsed_ms",
+		"bus": map[string]any{
+			"type": "nats",
+			"nats": map[string]any{
+				"url":        "nats://fixture-host:4222",
+				"mode":       "at_most_once",
+				"subject":    "fixture.keeps",
+				"stream":     "fixture-keeps",
+				"creds_file": "/fixture/nats.creds",
+			},
+		},
 	}
 }
 
@@ -74,18 +84,71 @@ func TestConfigFixtureExercisesEveryField(t *testing.T) {
 		if !f.IsExported() {
 			continue
 		}
-		assert.False(t, reflect.DeepEqual(dv.Field(i).Interface(), fv.Field(i).Interface()),
-			"%s: the fixture value equals the default, so the load proves nothing about it", f.Name)
+		if !assert.False(t, reflect.DeepEqual(dv.Field(i).Interface(), fv.Field(i).Interface()),
+			"%s: the fixture value equals the default, so the load proves nothing about it", f.Name) {
+			continue
+		}
+		descendSubBlock(t, fv.Field(i), f.Name)
 	}
 	require.NotEmpty(t, full.Policies)
-	pv := reflect.ValueOf(full.Policies[0])
-	for i := range pv.NumField() {
-		f := pv.Type().Field(i)
+	exercisesEveryField(t, reflect.ValueOf(full.Policies[0]), "Policies[0]")
+}
+
+// exercisesEveryField requires every exported field of a loaded
+// sub-block to carry a non-zero value. The differs-from-default check
+// above cannot reach inside one: a nil-by-default pointer differs from
+// its default the moment the fixture makes it non-nil, whatever — or
+// however little — the block behind it holds.
+func exercisesEveryField(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	for i := range v.NumField() {
+		f := v.Type().Field(i)
 		if !f.IsExported() {
 			continue
 		}
-		assert.False(t, pv.Field(i).IsZero(), "Policies[0].%s: unexercised by the fixture", f.Name)
+		name := path + "." + f.Name
+		if !assert.False(t, v.Field(i).IsZero(), "%s: unexercised by the fixture", name) {
+			continue
+		}
+		descendSubBlock(t, v.Field(i), name)
 	}
+}
+
+// descendSubBlock recurses when v holds a struct, behind a pointer or
+// not, so a sub-block nested inside another one is walked to the
+// leaves and neither spelling of "sub-block" escapes the requirement.
+func descendSubBlock(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	if v.Kind() == reflect.Struct {
+		exercisesEveryField(t, v, path)
+	}
+}
+
+// configStructs collects the struct types the config surface is built
+// from, reaching them through the pointer and slice fields that carry
+// sub-blocks. Derived rather than listed: a list is a manifest to
+// forget, and a sub-block missing from it is scanned by nothing.
+func configStructs(typ reflect.Type, seen map[reflect.Type]bool) []reflect.Type {
+	for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice {
+		typ = typ.Elem()
+	}
+	if typ.Kind() != reflect.Struct || seen[typ] {
+		return nil
+	}
+	seen[typ] = true
+	out := []reflect.Type{typ}
+	for i := range typ.NumField() {
+		if f := typ.Field(i); f.IsExported() {
+			out = append(out, configStructs(f.Type, seen)...)
+		}
+	}
+	return out
 }
 
 // TestConfigFieldsReferencedByTests requires each field's identifier to
@@ -104,7 +167,7 @@ func TestConfigFieldsReferencedByTests(t *testing.T) {
 		src.Write(b)
 	}
 	all := src.String()
-	for _, typ := range []reflect.Type{reflect.TypeFor[Config](), reflect.TypeFor[PolicyConfig]()} {
+	for _, typ := range configStructs(reflect.TypeFor[Config](), map[reflect.Type]bool{}) {
 		for i := range typ.NumField() {
 			f := typ.Field(i)
 			if !f.IsExported() {

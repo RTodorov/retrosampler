@@ -149,6 +149,56 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestBusConfigValidation(t *testing.T) {
+	base := func() *Config {
+		cfg := createDefaultConfig().(*Config)
+		cfg.StorageDir = t.TempDir()
+		cfg.DiskBudget = 1 << 30
+		return cfg
+	}
+	t.Run("absent bus block is valid (loopback default)", func(t *testing.T) {
+		require.NoError(t, base().Validate())
+	})
+	t.Run("unknown type refused", func(t *testing.T) {
+		cfg := base()
+		cfg.Bus = &BusConfig{Type: "redis"}
+		require.ErrorContains(t, cfg.Validate(), `bus.type "redis" is not supported`)
+	})
+	t.Run("nats requires the nats block and url", func(t *testing.T) {
+		cfg := base()
+		cfg.Bus = &BusConfig{Type: "nats"}
+		require.ErrorContains(t, cfg.Validate(), "bus.nats is required")
+		cfg.Bus.NATS = &NATSConfig{}
+		require.ErrorContains(t, cfg.Validate(), "bus.nats.url is required")
+	})
+	t.Run("mode must be durable or at_most_once", func(t *testing.T) {
+		cfg := base()
+		cfg.Bus = &BusConfig{Type: "nats", NATS: &NATSConfig{URL: "nats://h:4222", Mode: "exactly_once"}}
+		require.ErrorContains(t, cfg.Validate(), "bus.nats.mode")
+	})
+	t.Run("subject and stream refuse wildcards and spaces", func(t *testing.T) {
+		cfg := base()
+		cfg.Bus = &BusConfig{Type: "nats", NATS: &NATSConfig{URL: "nats://h:4222", Subject: "keeps.*"}}
+		require.ErrorContains(t, cfg.Validate(), "bus.nats.subject")
+		cfg.Bus.NATS = &NATSConfig{URL: "nats://h:4222", Stream: "has space"}
+		require.ErrorContains(t, cfg.Validate(), "bus.nats.stream")
+	})
+	t.Run("empty mode/subject/stream default", func(t *testing.T) {
+		cfg := base()
+		cfg.Bus = &BusConfig{Type: "nats", NATS: &NATSConfig{
+			URL: "nats://h:4222", CredsFile: "/nats.creds",
+		}}
+		require.NoError(t, cfg.Validate())
+		n := cfg.Bus.NATS.withDefaults()
+		assert.Equal(t, busModeDurable, n.Mode)
+		assert.Equal(t, "retrosampler.keeps", n.Subject)
+		assert.Equal(t, "retrosampler-keeps", n.Stream)
+		assert.Equal(t, "nats://h:4222", n.URL, "withDefaults copies, it does not rebuild")
+		assert.Equal(t, "/nats.creds", n.CredsFile,
+			"an operator's credentials must survive defaulting")
+	})
+}
+
 func TestValidatePolicyErrorNamesTheField(t *testing.T) {
 	cfg := validatableConfig(t)
 	cfg.Policies = []PolicyConfig{{Name: "bad", Condition: "span.name =="}}
