@@ -457,9 +457,9 @@ func TestFlusherRetryableFailureWithoutSetIsCounted(t *testing.T) {
 // question the histogram answers is whether keeps are beating W.
 //
 // Three phases, ordered behind one another on purpose: the single
-// flusher goroutine takes jobs in order, so once a later job's sample
-// lands the earlier ones are provably finished and a count can be
-// trusted rather than waited on.
+// flusher goroutine takes jobs in order, so once a later job's spans
+// reach the sink the earlier ones are provably finished and the samples
+// can be counted rather than waited on.
 func TestFlusherRecordsAgeRatio(t *testing.T) {
 	now := time.Unix(2000, 0)
 	spy := new(ageSpy)
@@ -500,12 +500,17 @@ func TestFlusherRecordsAgeRatio(t *testing.T) {
 		ID: id, Need: shards.NeedFlush,
 		Frags: [][]byte{encodeFragAt(t, id, "closer", now.Add(-90*time.Second))},
 	}
-	require.Eventually(t, func() bool { return len(spy.recorded()) == 2 },
-		5*time.Second, time.Millisecond)
-	assert.InDelta(t, 1.5, spy.recorded()[1], 0.001,
+	// The spans are the barrier, not the sample count. The sample is taken
+	// BEFORE the consume, so the closer's sample can land while its spans
+	// are still in flight: waiting on the spans implies the sample, never
+	// the reverse.
+	require.Eventually(t, func() bool { return sink.SpanCount() == 4 },
+		5*time.Second, time.Millisecond,
+		"all four spans flushed: the two unrecorded jobs are unrecorded, not dropped")
+	recorded := spy.recorded()
+	require.Len(t, recorded, 2, "the publish-only and unstamped jobs recorded nothing")
+	assert.InDelta(t, 1.5, recorded[1], 0.001,
 		"age past W is recorded as it is: over 1.0 is the signal, not an error")
-	assert.Equal(t, 4, sink.SpanCount(),
-		"all four spans still flushed: the two unrecorded jobs are unrecorded, not dropped")
 }
 
 // A span stamped in the future is clock skew, not negative age. It
@@ -531,27 +536,34 @@ func TestFlusherClampsFutureStampedAgeRatio(t *testing.T) {
 	assert.Zero(t, spy.recorded()[0], "a future stamp clamps rather than going negative")
 }
 
-// Both halves of the measurement are optional, and each turns it off on
-// its own: no recorder is a processor whose telemetry was never bound,
-// and a zero window is a denominator that would divide by zero. Neither
-// may cost the flush itself.
-func TestFlusherSkipsAgeRatioWithoutRecorderOrWindow(t *testing.T) {
+// The measurement needs a recorder, a clock and a positive window, and
+// each missing on its own turns it off: no recorder is a processor whose
+// telemetry was never bound, a zero window is a denominator that would
+// divide by zero, and a nil clock is a caller that wired two of the
+// three. None of them may cost the flush itself, and none may panic the
+// flusher goroutine — which would take the collector with it.
+func TestFlusherSkipsAgeRatioWhenUnwired(t *testing.T) {
 	now := time.Unix(2000, 0)
+	clock := func() time.Time { return now }
 	id := pcommon.TraceID{0x73}
+	// Reaching this at all means the guard let an unwired flusher through.
+	refuse := func(float64) { t.Error("an unwired flusher has no ratio to record") }
 
 	for _, tc := range []struct {
 		name   string
 		window time.Duration
+		now    func() time.Time
 		rec    func(float64)
 	}{
-		{"no recorder", time.Minute, nil},
-		{"zero window", 0, func(float64) { t.Error("a zero window has no ratio to record") }},
+		{"no recorder", time.Minute, clock, nil},
+		{"zero window", 0, clock, refuse},
+		{"no clock", time.Minute, nil, refuse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			jobs := make(chan *shards.FlushJob, 1)
 			sink := new(consumertest.TracesSink)
 			fl := newFlusher(jobs, nil, sink, bus.NewLoopback(),
-				tc.window, func() time.Time { return now }, tc.rec)
+				tc.window, tc.now, tc.rec)
 			fl.start()
 			defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
