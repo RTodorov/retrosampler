@@ -59,10 +59,12 @@ build-linux:
 
 e2e-compose: build-linux
 	docker build -f e2e/compose/Dockerfile -t retrosampler-e2e:local bin
+	GOOS=linux CGO_ENABLED=0 go build -o bin/loadgen-linux ./cmd/loadgen
+	docker build -f e2e/compose/Dockerfile.loadgen -t retrosampler-e2e-loadgen:local bin
 	scripts/e2e_compose.sh
 
-testbed:
-	@echo "testbed scenario not implemented yet (ADR-004 r3 floors pending)" >&2; exit 1
+testbed: build
+	scripts/testbed.sh
 
 golden:
 	@echo "regenerate goldens per package: go test <pkg> -update" >&2; exit 1
