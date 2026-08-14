@@ -33,6 +33,18 @@ var detReasons = []struct {
 	{bus.ReasonBaseline, "baseline"},
 }
 
+// busMetrics is the optional counter half of the bus contract: an
+// implementation with a connection behind it can report on it, the
+// in-process Loopback has nothing to report. SlowConsumerEpisodes is
+// deliberately left unbound — it counts entries into the slow state, not
+// keeps, and bus.dropped already carries the loss an operator acts on.
+type busMetrics interface {
+	Reconnects() uint64
+	Malformed() uint64
+	Dropped() uint64
+	Errors() uint64
+}
+
 // asInt64 narrows a counter to the width the OTel instruments take. The
 // clamp is unreachable at any ingest rate this processor can survive; it
 // is here so the conversion is total instead of sign-flipping.
@@ -92,6 +104,21 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 			return nil
 		}
 	}
+	// bm is the bus family's guard: the same nil-set test as live, plus
+	// the interface test. A bus that cannot count observes nothing at all
+	// rather than zeros — under the Loopback these four would describe a
+	// transport that does not exist, and a permanent zero there is
+	// indistinguishable from a healthy external bus. A bus that CAN count
+	// reports its zeros, which is what makes bus.dropped's guaranteed zero
+	// in durable mode readable as a fact instead of a silence.
+	bm := func(read func(busMetrics) uint64) metric.Int64Callback {
+		return func(_ context.Context, o metric.Int64Observer) error {
+			if m, ok := p.b.(busMetrics); ok && p.set.Load() != nil {
+				o.Observe(asInt64(read(m)))
+			}
+			return nil
+		}
+	}
 	// Both attribute tables resolve once here: the reason set is fixed and
 	// the policy names are immutable after Build, so no collect allocates.
 	reasonAttrs := make([]metric.MeasurementOption, len(detReasons))
@@ -128,6 +155,18 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 		),
 		tb.RegisterProcessorRetrosamplerBaggageMalformedCallback(
 			det(func(d *detect.Detector) int64 { return asInt64(d.BaggageMalformed()) }),
+		),
+		tb.RegisterProcessorRetrosamplerBusDroppedCallback(
+			bm(busMetrics.Dropped),
+		),
+		tb.RegisterProcessorRetrosamplerBusErrorsCallback(
+			bm(busMetrics.Errors),
+		),
+		tb.RegisterProcessorRetrosamplerBusMalformedCallback(
+			bm(busMetrics.Malformed),
+		),
+		tb.RegisterProcessorRetrosamplerBusReconnectsCallback(
+			bm(busMetrics.Reconnects),
 		),
 		tb.RegisterProcessorRetrosamplerCorruptFragmentsCallback(
 			// Two sources, each monotone on its own terms: fragments the

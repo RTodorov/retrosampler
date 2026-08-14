@@ -31,6 +31,10 @@ type TelemetryBuilder struct {
 	ProcessorRetrosamplerAppendErrors              metric.Int64ObservableCounter
 	ProcessorRetrosamplerBaggageDivergenceMs       metric.Int64ObservableGauge
 	ProcessorRetrosamplerBaggageMalformed          metric.Int64ObservableCounter
+	ProcessorRetrosamplerBusDropped                metric.Int64ObservableCounter
+	ProcessorRetrosamplerBusErrors                 metric.Int64ObservableCounter
+	ProcessorRetrosamplerBusMalformed              metric.Int64ObservableCounter
+	ProcessorRetrosamplerBusReconnects             metric.Int64ObservableCounter
 	ProcessorRetrosamplerCorruptFragments          metric.Int64ObservableCounter
 	ProcessorRetrosamplerDecidedEntries            metric.Int64ObservableGauge
 	ProcessorRetrosamplerDetectedKeeps             metric.Int64ObservableCounter
@@ -102,6 +106,66 @@ func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBaggageMalformedCa
 		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBaggageMalformed, obs: o})
 		return nil
 	}, builder.ProcessorRetrosamplerBaggageMalformed)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBusDroppedCallback sets callback for observable ProcessorRetrosamplerBusDropped metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBusDroppedCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBusDropped, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBusDropped)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBusErrorsCallback sets callback for observable ProcessorRetrosamplerBusErrors metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBusErrorsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBusErrors, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBusErrors)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBusMalformedCallback sets callback for observable ProcessorRetrosamplerBusMalformed metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBusMalformedCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBusMalformed, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBusMalformed)
+	if err != nil {
+		return err
+	}
+	builder.mu.Lock()
+	defer builder.mu.Unlock()
+	builder.registrations = append(builder.registrations, reg)
+	return nil
+}
+
+// RegisterProcessorRetrosamplerBusReconnectsCallback sets callback for observable ProcessorRetrosamplerBusReconnects metric.
+func (builder *TelemetryBuilder) RegisterProcessorRetrosamplerBusReconnectsCallback(cb metric.Int64Callback) error {
+	reg, err := builder.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		cb(ctx, &observerInt64{inst: builder.ProcessorRetrosamplerBusReconnects, obs: o})
+		return nil
+	}, builder.ProcessorRetrosamplerBusReconnects)
 	if err != nil {
 		return err
 	}
@@ -485,6 +549,30 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol.processor.retrosampler.baggage.malformed",
 		metric.WithDescription("Baggage attributes present but unusable - wrong type, bad grammar, or overflow. Instrumentation misconfiguration, not a propagation gap. [Development]"),
 		metric.WithUnit("{values}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBusDropped, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.bus.dropped",
+		metric.WithDescription("Keeps discarded client-side when this subscriber could not keep up - the documented operator trade of at_most_once core pub/sub (ADR-008 rule 6, ADR-011 rule 1). Always zero in durable mode, where a slow consumer resets and replays instead of dropping. [Development]"),
+		metric.WithUnit("{keeps}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBusErrors, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.bus.errors",
+		metric.WithDescription("Bus failures that reach no caller - asynchronous errors such as an auth or permissions refusal, and failed stream ensures. Sustained non-zero means this instance's keeps are not crossing the bus, however healthy the connection looks. [Development]"),
+		metric.WithUnit("{errors}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBusMalformed, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.bus.malformed",
+		metric.WithDescription("Bus messages dropped for a wrong-length payload (the wire format is a 16-byte id plus an optional reason byte, ADR-011 rule 6). [Development]"),
+		metric.WithUnit("{messages}"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerBusReconnects, err = builder.meter.Int64ObservableCounter(
+		"otelcol.processor.retrosampler.bus.reconnects",
+		metric.WithDescription("Bus client reconnects. Durable mode replays the gap; at_most_once mode lost it silently. [Development]"),
+		metric.WithUnit("{reconnects}"),
 	)
 	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerCorruptFragments, err = builder.meter.Int64ObservableCounter(

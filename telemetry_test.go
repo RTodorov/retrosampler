@@ -44,6 +44,10 @@ var wantInstruments = []string{
 	metricPrefix + "append.errors",
 	metricPrefix + "baggage.divergence_ms",
 	metricPrefix + "baggage.malformed",
+	metricPrefix + "bus.dropped",
+	metricPrefix + "bus.errors",
+	metricPrefix + "bus.malformed",
+	metricPrefix + "bus.reconnects",
 	metricPrefix + "corrupt.fragments",
 	metricPrefix + "decided.entries",
 	metricPrefix + "detected.keeps",
@@ -74,6 +78,16 @@ var wantInstruments = []string{
 func exceptPerPolicy(names []string) []string {
 	return slices.DeleteFunc(slices.Clone(names), func(n string) bool {
 		return strings.HasPrefix(n, metricPrefix+"policy.")
+	})
+}
+
+// exceptBus drops the bus instruments, which report nothing behind the
+// in-process Loopback: there is no client to reconnect, no wire to
+// malform and no pending queue to drop from, so a zero would describe
+// infrastructure that is not there.
+func exceptBus(names []string) []string {
+	return slices.DeleteFunc(slices.Clone(names), func(n string) bool {
+		return strings.HasPrefix(n, metricPrefix+"bus.")
 	})
 }
 
@@ -174,7 +188,7 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 		return ok && v == 1
 	}, 5*time.Second, 10*time.Millisecond, "the decided-set mirror is published on the tick")
 
-	assert.Equal(t, exceptPerPolicy(wantInstruments), reportedInstruments(t, tt),
+	assert.Equal(t, exceptBus(exceptPerPolicy(wantInstruments)), reportedInstruments(t, tt),
 		"every declared instrument must be bound to a callback")
 
 	// Exact rows go through the generated asserts, which pin unit,
@@ -262,7 +276,7 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 		sp.SetEndTimestamp(pcommon.NewTimestampFromTime(baseTime.Add(-time.Second)))
 	})))
 
-	assert.Equal(t, wantInstruments, reportedInstruments(t, tt),
+	assert.Equal(t, exceptBus(wantInstruments), reportedInstruments(t, tt),
 		"every declared instrument must be bound to a callback")
 
 	// Exact rows, so these also pin what is NOT reported: the three
@@ -409,6 +423,57 @@ func TestTelemetrySurvivesANilDetector(t *testing.T) {
 	}
 	assert.Contains(t, names, metricPrefix+"kept.local",
 		"the rest of the decision plane is unaffected")
+}
+
+// countingBus is a Loopback that also answers the busMetrics interface,
+// standing in for the connection counters a real client maintains.
+type countingBus struct {
+	bus.Bus
+	reconnects, malformed, dropped, errs uint64
+}
+
+func (b *countingBus) Reconnects() uint64 { return b.reconnects }
+func (b *countingBus) Malformed() uint64  { return b.malformed }
+func (b *countingBus) Dropped() uint64    { return b.dropped }
+func (b *countingBus) Errors() uint64     { return b.errs }
+
+// The bus counters are the only view an operator has of the transport
+// the keeps ride on, and every one of them fails the same way: quietly,
+// with the rest of the pipeline green. Four distinct values, so a
+// callback wired to the wrong counter cannot read the right number by
+// coincidence — and one of them zero, which pins that a live client
+// reports its zero rather than going absent. That distinction is the
+// whole of bus.dropped in durable mode: "this bus drops nothing" and
+// "nothing is watching for drops" must not look alike.
+//
+// Absence belongs to the Loopback instead, where these four describe
+// infrastructure that does not exist; the wantInstruments comparisons
+// under exceptBus are where that is pinned.
+func TestTelemetryReportsBusHealth(t *testing.T) {
+	tt := newTestTelemetry(t)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 1
+	ctx := context.Background()
+	b := &countingBus{Bus: bus.NewLoopback(), reconnects: 2, malformed: 3, dropped: 0, errs: 5}
+	p := newTestProcessor(t, cfg, b)
+	p.next = new(consumertest.TracesSink)
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+
+	for _, name := range []string{"bus.dropped", "bus.errors", "bus.malformed", "bus.reconnects"} {
+		_, ok := metricInt64(tt, metricPrefix+name)
+		assert.Falsef(t, ok, "%s reports a client the component has not started yet", name)
+	}
+
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(ctx)) }()
+
+	assert.Equal(t, int64(2), requireMetricInt64(t, tt, metricPrefix+"bus.reconnects"))
+	assert.Equal(t, int64(3), requireMetricInt64(t, tt, metricPrefix+"bus.malformed"))
+	assert.Equal(t, int64(5), requireMetricInt64(t, tt, metricPrefix+"bus.errors"))
+	assert.Equal(t, int64(0), requireMetricInt64(t, tt, metricPrefix+"bus.dropped"),
+		"a live client reports its zero: absent means no client, not no drops")
 }
 
 // A refused Publish is the least observable failure in the flusher: the

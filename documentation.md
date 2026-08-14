@@ -30,6 +30,38 @@ Baggage attributes present but unusable - wrong type, bad grammar, or overflow. 
 | ---- | ----------- | ---------- | --------- | --------- |
 | {values} | Sum | Int | true | Development |
 
+### otelcol.processor.retrosampler.bus.dropped
+
+Keeps discarded client-side when this subscriber could not keep up - the documented operator trade of at_most_once core pub/sub (ADR-008 rule 6, ADR-011 rule 1). Always zero in durable mode, where a slow consumer resets and replays instead of dropping.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {keeps} | Sum | Int | true | Development |
+
+### otelcol.processor.retrosampler.bus.errors
+
+Bus failures that reach no caller - asynchronous errors such as an auth or permissions refusal, and failed stream ensures. Sustained non-zero means this instance's keeps are not crossing the bus, however healthy the connection looks.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {errors} | Sum | Int | true | Development |
+
+### otelcol.processor.retrosampler.bus.malformed
+
+Bus messages dropped for a wrong-length payload (the wire format is a 16-byte id plus an optional reason byte, ADR-011 rule 6).
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {messages} | Sum | Int | true | Development |
+
+### otelcol.processor.retrosampler.bus.reconnects
+
+Bus client reconnects. Durable mode replays the gap; at_most_once mode lost it silently.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| {reconnects} | Sum | Int | true | Development |
+
 ### otelcol.processor.retrosampler.corrupt.fragments
 
 Fragment skip events - corrupt length or CRC mismatch at Collect, plus decode failures at flush. Events, not distinct fragments - a retried tick re-counts the same bad bytes on disk.
