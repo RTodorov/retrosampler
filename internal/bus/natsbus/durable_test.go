@@ -142,6 +142,32 @@ func TestDurableEnsureRepairsHorizon(t *testing.T) {
 		"ensure repairs a horizon above W (ADR-011 r2)")
 }
 
+// Close without a preceding cancel must still stop the subscribe loop:
+// a live consume has to notice the connection it rides on is closed for
+// good and give up, rather than park on a cancel that never comes or
+// retry a rebuild that can never succeed. goleak (TestMain) is the
+// assertion — the loop goroutine outliving the binary is the failure.
+func TestDurableCloseWithoutCancelStopsTheLoop(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c := newDurableClient(t, ns.ClientURL())
+	got := make(chan struct{}, 1)
+	// The cancel is dropped on purpose: Close is the only teardown here.
+	_, err := c.Subscribe(func([16]byte, byte) {
+		select {
+		case got <- struct{}{}:
+		default:
+		}
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.Publish(context.Background(), tid(1), bus.ReasonError))
+	select {
+	case <-got:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the consume never went live, so Close would prove nothing")
+	}
+	require.NoError(t, c.Close())
+}
+
 // Replay survives a server restart: file-store state persists, the
 // ordered consumer resumes, and a publish after recovery reaches the
 // subscriber that lived through the bounce.
