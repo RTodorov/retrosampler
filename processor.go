@@ -31,6 +31,16 @@ import (
 // proves it needs to be a knob (ADR-005 r2).
 const flushQueueDepth = 64
 
+// busStarter and busCloser are the optional halves of the bus lifecycle.
+// bus.Bus itself is the narrow contract — publish and subscribe — so an
+// implementation with a connection behind it declares the rest here: the
+// Loopback needs neither, and a client that has to dial and drain gets
+// both. The factory pins that the real client satisfies them.
+type (
+	busStarter interface{ Start(context.Context) error }
+	busCloser  interface{ Close() error }
+)
+
 // errOverloaded is the retryable refusal: some fragment or keep verdict
 // of the batch could not be enqueued (floor or queue-full). Plain — not
 // consumererror.Permanent — so receivers retry (ADR-007 r5).
@@ -139,7 +149,16 @@ func newProcessor(cfg *Config, ts component.TelemetrySettings, now func() time.T
 	return p, nil
 }
 
-func (p *retroProcessor) start(_ context.Context, _ component.Host) error {
+func (p *retroProcessor) start(ctx context.Context, _ component.Host) error {
+	// The bus dials first, and its failures are the unusable-option kind:
+	// an unreachable server retries behind a live connection instead
+	// (ADR-008), so what fails here fails before any shard state exists to
+	// unwind. Whatever is started after it owes it a Close on the way out.
+	if s, ok := p.b.(busStarter); ok {
+		if err := s.Start(ctx); err != nil {
+			return err
+		}
+	}
 	n := runtime.GOMAXPROCS(0)
 	if p.cfg.Shards > 0 && p.cfg.Shards < n {
 		n = p.cfg.Shards
@@ -159,6 +178,7 @@ func (p *retroProcessor) start(_ context.Context, _ component.Host) error {
 		Flush: p.jobs,
 	})
 	if err != nil {
+		p.closeBus(ctx)
 		return err
 	}
 	p.fl = newFlusher(p.jobs, set, p.next, p.b)
@@ -166,14 +186,19 @@ func (p *retroProcessor) start(_ context.Context, _ component.Host) error {
 	cancel, err := p.b.Subscribe(func(id [16]byte, reason byte) {
 		// The abort must be non-nil: KeepFromBus blocks on an exhausted
 		// free ring, and stopc is what releases it at shutdown. Never
-		// cancel the subscription from in here — cancel waits for this
-		// callback to return.
+		// cancel the subscription from in here — an implementation whose
+		// cancel waits for the in-flight callback (the Loopback's does)
+		// would wait on this one forever.
 		if s := p.set.Load(); s != nil {
 			s.KeepFromBus(id, reason, p.now(), p.fl.stopc)
 		}
 	})
 	if err != nil {
-		return errors.Join(err, p.fl.stop(context.Background()), set.Shutdown(context.Background()))
+		err = errors.Join(err, p.fl.stop(context.Background()), set.Shutdown(context.Background()))
+		// Closed last here too: the flusher above may still have been
+		// publishing over it.
+		p.closeBus(ctx)
+		return err
 	}
 	p.subCancel = cancel
 	// Published last: a keep broadcast between Subscribe and here finds no
@@ -213,9 +238,10 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 // waits for, so Set.Shutdown burns its whole context on a sender only
 // fl.stop can release. Stopping the flusher first releases it, and the
 // shard workers are still running to refill the ring meanwhile. The
-// unsubscribe leads for the same reason: cancel waits for an in-flight
-// callback, whose KeepFromBus can only make progress while the workers
-// live.
+// unsubscribe leads for the same reason: an implementation's cancel MAY
+// wait for an in-flight callback (the Loopback's always does, and the
+// contract permits it), and that callback's KeepFromBus can only make
+// progress while the workers live.
 //
 // After fl.stop the workers keep draining their queues into the jobs
 // channel buffer, or park the intents when it fills. The fragments are
@@ -223,6 +249,11 @@ func (p *retroProcessor) processTraces(_ context.Context, td ptrace.Traces) (ptr
 // but a keep detected here and not yet published dies with the process:
 // detection runs at ingest only, never over recovered fragments. That is
 // ADR-009 r6's accepted crash window, not a drain this can close.
+//
+// The bus closes last, and only once the drains have succeeded: the
+// flusher's final publishes ride it, and while a timed-out shutdown is
+// still retryable the connection is still owed. A shutdown that reports
+// success is never retried, so the Close below runs exactly once.
 func (p *retroProcessor) shutdown(ctx context.Context) error {
 	s := p.set.Swap(nil)
 	if s == nil {
@@ -246,10 +277,37 @@ func (p *retroProcessor) shutdown(ctx context.Context) error {
 		p.set.Store(s)
 		return err
 	}
+	p.closeBus(ctx)
 	// Last, and only once the shutdown has actually succeeded: while a
 	// timed-out shutdown is still retryable the workers are alive, and
 	// that is exactly when the parked-flush and window gauges are worth
 	// reading.
 	p.unbindTelemetry()
 	return nil
+}
+
+// closeBus closes a bus that has a connection to close, bounded by ctx.
+// The bound is nats.go's: its drain waits on in-flight delivery
+// callbacks up to a 30s timeout, and a callback that has wedged would
+// hand the collector's shutdown a stall it budgeted nothing for. A Close
+// that outruns ctx is logged and abandoned rather than waited on — the
+// connection dies with the process either way — and it never fails an
+// otherwise clean shutdown, which would only ask the caller to retry a
+// drain that has already done everything it can.
+func (p *retroProcessor) closeBus(ctx context.Context) {
+	c, ok := p.b.(busCloser)
+	if !ok {
+		return
+	}
+	// Buffered, so an abandoned Close still lets its goroutine finish.
+	done := make(chan error, 1)
+	go func() { done <- c.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			p.logger.Warn("bus close", zap.Error(err))
+		}
+	case <-ctx.Done():
+		p.logger.Warn("bus close abandoned", zap.Error(ctx.Err()))
+	}
 }
