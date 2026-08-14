@@ -47,7 +47,7 @@ generate:
 build:
 	mkdir -p bin
 	$(TOOLS_DIR)/builder --config builder-config.yaml
-	cp bin/ocb-dist/retrosamplercol bin/retrosamplercol
+	install -m 755 bin/ocb-dist/retrosamplercol bin/retrosamplercol
 
 e2e: build
 	scripts/e2e.sh
