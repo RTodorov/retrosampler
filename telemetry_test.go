@@ -35,6 +35,11 @@ const metricPrefix = "otelcol.processor.retrosampler."
 // comparing this list against a live collection is what proves each
 // declared instrument was actually bound.
 //
+// flush.age.ratio is the one synchronous instrument and so the one that
+// needs no callback: it reports once a flush has recorded a sample into
+// it, which is why every comparison below stands behind a wait for the
+// flush rather than reading straight after ConsumeTraces.
+//
 // The attributed instruments observe one point per non-zero counter and
 // nothing while every counter under them is zero, so only a run that has
 // fired a keep, a policy match AND a policy eval error reports the whole
@@ -55,6 +60,7 @@ var wantInstruments = []string{
 	metricPrefix + "early_expired.segments",
 	metricPrefix + "effective_window.seconds",
 	metricPrefix + "expired.bytes",
+	metricPrefix + "flush.age.ratio",
 	metricPrefix + "flush.errors",
 	metricPrefix + "flush.retries",
 	metricPrefix + "flushed.spans",
@@ -113,6 +119,20 @@ func metricInt64(tt *componenttest.Telemetry, name string) (int64, bool) {
 	return 0, false
 }
 
+// metricHistogramFloat64 reads the single data point of a float64
+// histogram — flush.age.ratio is the only one. Like metricInt64 it never
+// fails the test, so a poll may call it.
+func metricHistogramFloat64(tt *componenttest.Telemetry, name string) (metricdata.HistogramDataPoint[float64], bool) {
+	m, err := tt.GetMetric(name)
+	if err != nil {
+		return metricdata.HistogramDataPoint[float64]{}, false
+	}
+	if d, ok := m.Data.(metricdata.Histogram[float64]); ok && len(d.DataPoints) == 1 {
+		return d.DataPoints[0], true
+	}
+	return metricdata.HistogramDataPoint[float64]{}, false
+}
+
 // requireMetricInt64 is metricInt64 for a quiesced processor, where a
 // missing instrument is a failure rather than something to wait for.
 func requireMetricInt64(t *testing.T, tt *componenttest.Telemetry, name string) int64 {
@@ -166,7 +186,14 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 	require.NoError(t, p.Start(ctx, componenttest.NewNopHost()))
 	defer func() { require.NoError(t, p.Shutdown(ctx)) }()
 
-	require.NoError(t, p.ConsumeTraces(ctx, errorSpanBatch(pcommon.TraceID{0xAE}, "boom")))
+	// Stamped, because the W instrument samples the oldest span start and
+	// an unstamped batch has no age to record: without this the histogram
+	// is legitimately absent and the whole-list comparison below could
+	// not tell that apart from an instrument nobody wired.
+	boom := errorSpanBatch(pcommon.TraceID{0xAE}, "boom")
+	boom.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).
+		SetStartTimestamp(pcommon.NewTimestampFromTime(systemClock().Add(-time.Second)))
+	require.NoError(t, p.ConsumeTraces(ctx, boom))
 	healthy := ptrace.NewTraces()
 	hs := healthy.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	hs.SetTraceID(pcommon.TraceID{0xAF})
@@ -236,8 +263,11 @@ func TestTelemetryReportsTheDecisionPlane(t *testing.T) {
 //     re-offers the verdict, and the decided set absorbs it. One batch
 //     per trace here, so none of that shows up.
 //
-// Every counter here moves inside ConsumeTraces — detection runs at
-// ingest — so the collection needs no settling.
+// Every detection counter here moves inside ConsumeTraces — detection
+// runs at ingest — so none of the attributed rows below need settling.
+// The whole-list comparison does: flush.age.ratio is recorded on the
+// flusher, and only the trace carrying a start timestamp produces a
+// sample, so the list is read once all three traces have flushed.
 func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 	tt := newTestTelemetry(t)
 	cfg := createDefaultConfig().(*Config)
@@ -276,6 +306,8 @@ func TestTelemetryAttributesDetectionByReasonAndPolicy(t *testing.T) {
 		sp.SetEndTimestamp(pcommon.NewTimestampFromTime(baseTime.Add(-time.Second)))
 	})))
 
+	require.Eventually(t, func() bool { return sink.SpanCount() == 3 },
+		5*time.Second, time.Millisecond, "all three keeps flush")
 	assert.Equal(t, exceptBus(wantInstruments), reportedInstruments(t, tt),
 		"every declared instrument must be bound to a callback")
 
@@ -600,6 +632,53 @@ func TestTelemetryCorruptFragmentsCountsDecodeFailures(t *testing.T) {
 		"the flusher's decode failures land in the same counter")
 }
 
+// The W instrument end to end (ADR-011 r9). The flusher's own tests pin
+// the arithmetic against an injected recorder; what only this can see is
+// the wiring underneath it — that the denominator is the CONFIGURED
+// window and the numerator is measured on the processor's own clock. A
+// recorder handed wall time, or the effective window, computes a
+// different number from the same span and every flusher test still
+// passes.
+//
+// The buckets are pinned here too. They are the instrument's whole
+// resolution: drop 1.0 or the headroom above it and the histogram can no
+// longer answer the question it exists for, which is whether keeps are
+// landing on the wrong side of W.
+func TestTelemetryRecordsFlushAgeRatio(t *testing.T) {
+	tt := newTestTelemetry(t)
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 1
+	ctx := context.Background()
+	// Frozen, so the ratio is exact rather than a tolerance around the
+	// wall-clock time the flush took to happen.
+	clk := newFakeProcClock(baseTime)
+	sink := new(consumertest.TracesSink)
+	p, err := newProcessor(cfg, tt.NewTelemetrySettings(), clk.Now, bus.NewLoopback())
+	require.NoError(t, err)
+	p.next = sink
+	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
+	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
+	defer func() { require.NoError(t, p.shutdown(ctx)) }()
+
+	// Three quarters of the way through the window when it flushes.
+	aging := errorSpanBatch(pcommon.TraceID{0x9A}, "aging")
+	aging.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).
+		SetStartTimestamp(pcommon.NewTimestampFromTime(baseTime.Add(-3 * cfg.Window / 4)))
+	consumeAccepted(t, p, aging)
+
+	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+		5*time.Second, time.Millisecond, "the error trace flushes")
+	dp, ok := metricHistogramFloat64(tt, metricPrefix+"flush.age.ratio")
+	require.True(t, ok, "the flush recorded no age ratio")
+	assert.Equal(t, uint64(1), dp.Count, "one flushed batch, one sample")
+	assert.InDelta(t, 0.75, dp.Sum, 0.001,
+		"the age is a fraction of the configured window, on the injected clock")
+	assert.Equal(t, []float64{0.1, 0.25, 0.5, 0.75, 0.9, 1, 1.25, 1.5}, dp.Bounds,
+		"the declared buckets straddle 1.0 and leave headroom past it")
+}
+
 // The collector builds its pipeline before it starts it, so between
 // the factory call and Start the callbacks are already registered while
 // the set pointer is still nil. That window must report nothing: a zero
@@ -625,6 +704,16 @@ func TestTelemetryReportsNothingBeforeStart(t *testing.T) {
 // dropped to zero on shutdown would read downstream as a counter reset
 // — a spurious spike on every restart.
 //
+// That silence is the ASYNC plane's, and only its. flush.age.ratio is
+// synchronous: its samples sit in the reader's cumulative aggregation
+// rather than behind a callback the unbind can drop, so the distribution
+// it already recorded keeps being reported and there is nothing to fix —
+// a distribution is not read as a rate, so none of the reset hazard
+// above applies to it. The span below is stamped precisely so a sample
+// exists to see that with. Left unstamped it would record nothing, the
+// collection would come back empty for an unrelated reason, and this
+// test would pass while pinning the wrong fact.
+//
 // The drained shutdown path has its own unbind, distinct from the no-op
 // path TestTelemetryUnbindsWithoutStart covers, and an empty collection
 // does not prove it ran: callbacks that survived would report nothing
@@ -644,25 +733,37 @@ func TestTelemetryGoesSilentAfterShutdown(t *testing.T) {
 	require.NoError(t, p.bindTelemetry(tt.NewTelemetrySettings()))
 	require.NoError(t, p.start(ctx, componenttest.NewNopHost()))
 
-	_, err := p.processTraces(ctx, errorSpanBatch(pcommon.TraceID{0x1D}, "counted"))
+	counted := errorSpanBatch(pcommon.TraceID{0x1D}, "counted")
+	counted.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).
+		SetStartTimestamp(pcommon.NewTimestampFromTime(systemClock().Add(-time.Second)))
+	_, err := p.processTraces(ctx, counted)
 	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
 	require.Eventually(t, func() bool {
 		v, ok := metricInt64(tt, metricPrefix+"kept.local")
 		return ok && v == 1
 	}, 5*time.Second, time.Millisecond, "the counter is live before shutdown")
+	// The keep being counted does not mean it has flushed: the intent may
+	// still be on the worker's queue, and a shutdown that beats it there
+	// leaves the flusher nothing to drain (the ADR-009 r6 crash window).
+	// The histogram assertion below needs the sample, so wait for it.
+	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+		5*time.Second, time.Millisecond, "the kept trace flushes before shutdown")
 
 	// Captured before the swap, and still readable afterwards: Stats and
 	// the length mirrors are plain atomics on a stopped set.
 	s := p.set.Load()
 	require.NotNil(t, s)
 	require.NoError(t, p.shutdown(ctx))
-	assert.Empty(t, reportedInstruments(t, tt),
+	// The recorded distribution is the whole of what a stopped component
+	// still reports: every async instrument has gone quiet around it.
+	afterShutdown := []string{metricPrefix + "flush.age.ratio"}
+	assert.Equal(t, afterShutdown, reportedInstruments(t, tt),
 		"a retired processor observes nothing rather than a reset to zero")
 
 	require.Equal(t, uint64(1), s.Stats().KeptLocal,
 		"the set still holds the counters a surviving callback would find")
 	p.set.Store(s)
-	assert.Empty(t, reportedInstruments(t, tt),
+	assert.Equal(t, afterShutdown, reportedInstruments(t, tt),
 		"the drained shutdown dropped the callbacks, so a live set goes unreported")
 }
 
@@ -695,7 +796,7 @@ func TestTelemetryUnbindsWithoutStart(t *testing.T) {
 	defer func() { require.NoError(t, set.Shutdown(ctx)) }()
 	// A flusher too, unstarted: a surviving callback must fail the
 	// assertion below rather than dereference a nil one.
-	p.fl = newFlusher(jobs, set, p.next, p.b)
+	p.fl = newFlusher(jobs, set, p.next, p.b, 0, nil, nil)
 	p.set.Store(set)
 
 	assert.Empty(t, reportedInstruments(t, tt),

@@ -181,7 +181,7 @@ func (p *retroProcessor) start(ctx context.Context, _ component.Host) error {
 		p.closeBus(ctx)
 		return err
 	}
-	p.fl = newFlusher(p.jobs, set, p.next, p.b)
+	p.fl = newFlusher(p.jobs, set, p.next, p.b, p.cfg.Window, p.now, p.ageRecorder())
 	p.fl.start()
 	cancel, err := p.b.Subscribe(func(id [16]byte, reason byte) {
 		// The abort must be non-nil: KeepFromBus blocks on an exhausted

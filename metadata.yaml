@@ -18,11 +18,16 @@ tests:
     disk_budget: 1073741824
     shards: 4
 
-# Every instrument is async: the callbacks read counters the hot path
-# has already incremented atomically, so ingest never touches an OTel
-# API (ADR-004 r2). prefix pins the emitted names to the dotted
-# otelcol.* form; without it mdatagen would splice these dotted ids
-# onto its underscore default as otelcol_processor.retrosampler.*.
+# Every instrument is async but flush.age.ratio: the callbacks read
+# counters the hot path has already incremented atomically, so ingest
+# never touches an OTel API (ADR-004 r2). A distribution cannot be
+# rebuilt from an atomic, so the one histogram records synchronously —
+# on the flusher goroutine, which is off the ingest path by
+# construction, so r2 holds there too.
+#
+# prefix pins the emitted names to the dotted otelcol.* form; without it
+# mdatagen would splice these dotted ids onto its underscore default as
+# otelcol_processor.retrosampler.*.
 # mdatagen requires the keys below in byte order, which is why they
 # read alphabetically rather than by ladder rung.
 telemetry:
@@ -177,6 +182,16 @@ telemetry:
         value_type: int
         monotonic: true
         async: true
+
+    processor.retrosampler.flush.age.ratio:
+      prefix: otelcol.
+      enabled: true
+      stability: development
+      description: Age of each flushed fragment batch's oldest span as a fraction of the configured W, recorded at flush. Mass near 1.0 means keeps barely beat expiry - the W-validation instrument (ADR-011 rule 9).
+      unit: "1"
+      histogram:
+        value_type: double
+        bucket_boundaries: [0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.25, 1.5]
 
     processor.retrosampler.flush.errors:
       prefix: otelcol.

@@ -72,19 +72,52 @@ func newFlushTestSet(t *testing.T, jobs chan *shards.FlushJob, clk *fakeProcCloc
 	return set
 }
 
-// encodeFrag marshals a one-span trace via the production encoder.
+// encodeFrag marshals a one-span trace via the production encoder,
+// leaving the span's start unstamped as most of these fixtures do.
 func encodeFrag(t *testing.T, id pcommon.TraceID, name string) []byte {
+	t.Helper()
+	return encodeFragAt(t, id, name, time.Time{})
+}
+
+// encodeFragAt is encodeFrag with the span's start stamped: that
+// timestamp is the only fixture input the age ratio reads. A zero start
+// is left unset rather than encoded as the epoch, so an unstamped
+// fixture stays indistinguishable from a span that never carried one.
+func encodeFragAt(t *testing.T, id pcommon.TraceID, name string, start time.Time) []byte {
 	t.Helper()
 	td := ptrace.NewTraces()
 	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	sp.SetTraceID(id)
 	sp.SetName(name)
+	if !start.IsZero() {
+		sp.SetStartTimestamp(pcommon.NewTimestampFromTime(start))
+	}
 	var out []byte
 	fragmenter.New().Fragment(td, nil, nil, func(_ pcommon.TraceID, frag []byte, _ byte, _ bool) {
 		out = append([]byte(nil), frag...)
 	})
 	require.NotEmpty(t, out)
 	return out
+}
+
+// ageSpy collects the age ratios the flusher records. The flusher writes
+// them from its own goroutine, so the slice is guarded and handed out as
+// a copy — the busSpy convention.
+type ageSpy struct {
+	mu      sync.Mutex
+	samples []float64
+}
+
+func (s *ageSpy) record(ratio float64) {
+	s.mu.Lock()
+	s.samples = append(s.samples, ratio)
+	s.mu.Unlock()
+}
+
+func (s *ageSpy) recorded() []float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]float64(nil), s.samples...)
 }
 
 // spanNames flattens every span name the sink has been handed.
@@ -152,7 +185,7 @@ func TestFlusherPublishesDecodesAndConsumes(t *testing.T) {
 	jobs := make(chan *shards.FlushJob, 4)
 	sink := new(consumertest.TracesSink)
 	spy := newBusSpy()
-	fl := newFlusher(jobs, nil, sink, spy)
+	fl := newFlusher(jobs, nil, sink, spy, 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -211,7 +244,7 @@ func TestFlusherConsumerFailureRetriesViaShard(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	flaky := newFlakyConsumer(t, &fail, sink)
 	spy := newBusSpy()
-	fl := newFlusher(jobs, set, flaky, spy)
+	fl := newFlusher(jobs, set, flaky, spy, 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -232,7 +265,7 @@ func TestFlusherConsumerFailureRetriesViaShard(t *testing.T) {
 func TestFlusherPermanentErrorDropsJob(t *testing.T) {
 	jobs := make(chan *shards.FlushJob, 4)
 	perm := consumertest.NewErr(consumererror.NewPermanent(errors.New("bad")))
-	fl := newFlusher(jobs, nil, perm, bus.NewLoopback())
+	fl := newFlusher(jobs, nil, perm, bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -260,7 +293,7 @@ func TestFlusherPublishFailureRetriesWholeIntent(t *testing.T) {
 	spy := newBusSpy()
 	spy.failing.Store(true)
 	sink := new(consumertest.TracesSink)
-	fl := newFlusher(jobs, set, sink, spy)
+	fl := newFlusher(jobs, set, sink, spy, 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -288,7 +321,7 @@ func TestFlusherPermanentErrorSkipsShardRetry(t *testing.T) {
 	require.True(t, set.Offer(id, encodeFrag(t, id, "doomed"), clk.Now()))
 
 	perm := consumertest.NewErr(consumererror.NewPermanent(errors.New("bad")))
-	fl := newFlusher(jobs, set, perm, bus.NewLoopback())
+	fl := newFlusher(jobs, set, perm, bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -305,7 +338,7 @@ func TestFlusherPermanentErrorSkipsShardRetry(t *testing.T) {
 func TestFlusherDrainsQueuedJobsOnStop(t *testing.T) {
 	jobs := make(chan *shards.FlushJob, 4)
 	sink := new(consumertest.TracesSink)
-	fl := newFlusher(jobs, nil, sink, bus.NewLoopback())
+	fl := newFlusher(jobs, nil, sink, bus.NewLoopback(), 0, nil, nil)
 
 	id := pcommon.TraceID{0x33}
 	for _, name := range []string{"a", "b", "c"} {
@@ -330,7 +363,7 @@ func TestFlusherStopReportsTimeoutThenSucceeds(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	fl := newFlusher(jobs, nil, blocking, bus.NewLoopback())
+	fl := newFlusher(jobs, nil, blocking, bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 
 	id := pcommon.TraceID{0x55}
@@ -350,7 +383,7 @@ func TestFlusherStopReportsTimeoutThenSucceeds(t *testing.T) {
 // double-close the signal, and a flusher that already exited must not be
 // charged to a spent context (the shards.Shutdown convention).
 func TestFlusherStopRetryAfterCleanExit(t *testing.T) {
-	fl := newFlusher(make(chan *shards.FlushJob), nil, consumertest.NewNop(), bus.NewLoopback())
+	fl := newFlusher(make(chan *shards.FlushJob), nil, consumertest.NewNop(), bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 	require.NoError(t, fl.stop(context.Background()))
 
@@ -363,7 +396,7 @@ func TestFlusherStopRetryAfterCleanExit(t *testing.T) {
 func TestFlusherSkipsUndecodableFragment(t *testing.T) {
 	jobs := make(chan *shards.FlushJob, 4)
 	sink := new(consumertest.TracesSink)
-	fl := newFlusher(jobs, nil, sink, bus.NewLoopback())
+	fl := newFlusher(jobs, nil, sink, bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -405,7 +438,7 @@ func TestFlusherRetryableFailureWithoutSetIsCounted(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	flaky := newFlakyConsumer(t, &fail, consumertest.NewNop())
-	fl := newFlusher(jobs, nil, flaky, bus.NewLoopback())
+	fl := newFlusher(jobs, nil, flaky, bus.NewLoopback(), 0, nil, nil)
 	fl.start()
 	defer func() { require.NoError(t, fl.stop(context.Background())) }()
 
@@ -416,4 +449,150 @@ func TestFlusherRetryableFailureWithoutSetIsCounted(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return fl.flushErrors.Load() == 1 },
 		5*time.Second, time.Millisecond)
+}
+
+// The W instrument (ADR-011 r9): one sample per flushed fragment batch,
+// (now - the OLDEST span start across every fragment) / W. The oldest is
+// what the ratio has to read — it is the span nearest expiry, and the
+// question the histogram answers is whether keeps are beating W.
+//
+// Three phases, ordered behind one another on purpose: the single
+// flusher goroutine takes jobs in order, so once a later job's sample
+// lands the earlier ones are provably finished and a count can be
+// trusted rather than waited on.
+func TestFlusherRecordsAgeRatio(t *testing.T) {
+	now := time.Unix(2000, 0)
+	spy := new(ageSpy)
+	jobs := make(chan *shards.FlushJob, 4)
+	sink := new(consumertest.TracesSink)
+	fl := newFlusher(jobs, nil, sink, bus.NewLoopback(),
+		time.Minute, func() time.Time { return now }, spy.record)
+	fl.start()
+	defer func() { require.NoError(t, fl.stop(context.Background())) }()
+
+	// 30s of age against a 60s window, and a younger span alongside it
+	// that must not win.
+	id := pcommon.TraceID{0x71}
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{
+			encodeFragAt(t, id, "young", now.Add(-10*time.Second)),
+			encodeFragAt(t, id, "oldest", now.Add(-30*time.Second)),
+		},
+	}
+	require.Eventually(t, func() bool { return len(spy.recorded()) == 1 },
+		5*time.Second, time.Millisecond)
+	assert.InDelta(t, 0.5, spy.recorded()[0], 0.001,
+		"the oldest span across the job sets the age, not the newest")
+
+	// A publish-only job carries no fragments and so has no age at all;
+	// recording a zero for it would pile mass at the healthy end of the
+	// histogram and understate exactly what the instrument watches for.
+	jobs <- &shards.FlushJob{ID: id, Reason: bus.ReasonError, Need: shards.NeedPublish}
+	// An unstamped span is an age nobody knows, which is not an age of
+	// zero either.
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{encodeFrag(t, id, "unstamped")},
+	}
+	// The closer proves both jobs above are done.
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{encodeFragAt(t, id, "closer", now.Add(-90*time.Second))},
+	}
+	require.Eventually(t, func() bool { return len(spy.recorded()) == 2 },
+		5*time.Second, time.Millisecond)
+	assert.InDelta(t, 1.5, spy.recorded()[1], 0.001,
+		"age past W is recorded as it is: over 1.0 is the signal, not an error")
+	assert.Equal(t, 4, sink.SpanCount(),
+		"all four spans still flushed: the two unrecorded jobs are unrecorded, not dropped")
+}
+
+// A span stamped in the future is clock skew, not negative age. It
+// clamps to 0 (ADR-008 r7) rather than putting mass below the histogram
+// and dragging the distribution away from the W it is measuring.
+func TestFlusherClampsFutureStampedAgeRatio(t *testing.T) {
+	now := time.Unix(2000, 0)
+	spy := new(ageSpy)
+	jobs := make(chan *shards.FlushJob, 4)
+	sink := new(consumertest.TracesSink)
+	fl := newFlusher(jobs, nil, sink, bus.NewLoopback(),
+		time.Minute, func() time.Time { return now }, spy.record)
+	fl.start()
+	defer func() { require.NoError(t, fl.stop(context.Background())) }()
+
+	id := pcommon.TraceID{0x72}
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{encodeFragAt(t, id, "ahead", now.Add(time.Minute))},
+	}
+	require.Eventually(t, func() bool { return len(spy.recorded()) == 1 },
+		5*time.Second, time.Millisecond)
+	assert.Zero(t, spy.recorded()[0], "a future stamp clamps rather than going negative")
+}
+
+// Both halves of the measurement are optional, and each turns it off on
+// its own: no recorder is a processor whose telemetry was never bound,
+// and a zero window is a denominator that would divide by zero. Neither
+// may cost the flush itself.
+func TestFlusherSkipsAgeRatioWithoutRecorderOrWindow(t *testing.T) {
+	now := time.Unix(2000, 0)
+	id := pcommon.TraceID{0x73}
+
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		rec    func(float64)
+	}{
+		{"no recorder", time.Minute, nil},
+		{"zero window", 0, func(float64) { t.Error("a zero window has no ratio to record") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := make(chan *shards.FlushJob, 1)
+			sink := new(consumertest.TracesSink)
+			fl := newFlusher(jobs, nil, sink, bus.NewLoopback(),
+				tc.window, func() time.Time { return now }, tc.rec)
+			fl.start()
+			defer func() { require.NoError(t, fl.stop(context.Background())) }()
+
+			jobs <- &shards.FlushJob{
+				ID: id, Need: shards.NeedFlush,
+				Frags: [][]byte{encodeFragAt(t, id, "quiet", now.Add(-30*time.Second))},
+			}
+			require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
+				5*time.Second, time.Millisecond, "the flush is unaffected either way")
+		})
+	}
+}
+
+// The sample is taken per flush ATTEMPT, not per accepted batch: a
+// refused consume records all the same, because those fragments go back
+// on the shard and keep aging toward expiry there. Recording only what
+// the consumer took would leave the histogram quiet through exactly the
+// outage that pushes ratios past 1.0. Without a Set the refusal is
+// counted and dropped, so this samples once and not in a retry loop.
+func TestFlusherRecordsAgeRatioOnRefusedFlush(t *testing.T) {
+	now := time.Unix(2000, 0)
+	spy := new(ageSpy)
+	jobs := make(chan *shards.FlushJob, 4)
+	var fail atomic.Bool
+	fail.Store(true)
+	flaky := newFlakyConsumer(t, &fail, consumertest.NewNop())
+	fl := newFlusher(jobs, nil, flaky, bus.NewLoopback(),
+		time.Minute, func() time.Time { return now }, spy.record)
+	fl.start()
+	defer func() { require.NoError(t, fl.stop(context.Background())) }()
+
+	id := pcommon.TraceID{0x74}
+	jobs <- &shards.FlushJob{
+		ID: id, Need: shards.NeedFlush,
+		Frags: [][]byte{encodeFragAt(t, id, "refused", now.Add(-30*time.Second))},
+	}
+	// The sample precedes the consume, so the error counter trailing it is
+	// proof the recording had its chance.
+	require.Eventually(t, func() bool { return fl.flushErrors.Load() == 1 },
+		5*time.Second, time.Millisecond)
+	recorded := spy.recorded()
+	require.Len(t, recorded, 1, "the batch the consumer refused was sampled too")
+	assert.InDelta(t, 0.5, recorded[0], 0.001)
 }
