@@ -202,16 +202,21 @@ func RunHardening(t *testing.T, h Harness) {
 		defer cl()
 		pub := h.Mk(t)
 		require.NoError(t, pub.Publish(context.Background(), tid(42), bus.ReasonError))
-		require.Eventually(t, func() bool { return live.count() == 1 },
-			5*time.Second, time.Millisecond,
-			"one wedged subscriber must not stall delivery to another (Loopback constraint #3, discharged)")
-		// The wedge has to be real, or the assertion above says nothing:
-		// a subscriber that never received anything blocks nothing.
+		// The wedge is the precondition of the claim, so it is established
+		// before the claim is tested rather than confirmed after it. Read
+		// the other way round, a live delivery that won the dispatch race
+		// would satisfy the assertion before anything was blocked at all,
+		// and a genuine head-of-line regression would pass unseen. fn
+		// signals entered before it blocks, so waiting here cannot
+		// deadlock.
 		select {
 		case <-entered:
 		case <-time.After(5 * time.Second):
 			t.Fatal("the blocked subscriber never entered fn, so nothing was ever wedged")
 		}
+		require.Eventually(t, func() bool { return live.count() == 1 },
+			5*time.Second, time.Millisecond,
+			"one wedged subscriber must not stall delivery to another (Loopback constraint #3, discharged)")
 	})
 
 	t.Run("reconnect_resumes_delivery", func(t *testing.T) {
