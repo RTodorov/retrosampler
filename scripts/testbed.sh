@@ -61,19 +61,21 @@ dur_s=$(secs "$DUR")
 # its watermark and one window of payload (+15% for record framing and the
 # up-to-one-tick expiry lag), plus the exporter's kept stream for the
 # whole run (~3.5% of ingest kept, JSON at roughly 2x the protobuf), plus
-# 2 GB of slack.
-need_gb=$(awk -v budget="$DISK_BUDGET" -v pct="$WATERMARK_PCT" -v mbps="$RATE_MBPS" \
+# 2 GiB of slack. The rates are decimal but both df forms report GiB
+# (macOS -g, GNU -BG), so the total converts to GiB before comparing -
+# against decimal GB the check would run ~7% lenient.
+need_gib=$(awk -v budget="$DISK_BUDGET" -v pct="$WATERMARK_PCT" -v mbps="$RATE_MBPS" \
   -v w="$w_s" -v dur="$dur_s" -v kept=0.035 'BEGIN {
     mark = budget / 100 * pct
     win = (w > 0 ? mbps * 1e6 * w * 1.15 : mark)
     buf = (win < mark ? win : mark)
     out = (dur > 0 ? mbps * 1e6 * dur * kept * 2 : 0)
-    printf "%d\n", (buf + out) / 1e9 + 3
+    printf "%d\n", (buf + out) / 1073741824 + 3
   }')
-free_gb=$(df -g "$SCRATCH" 2>/dev/null | awk 'NR==2 {print $4}') ||
-  free_gb=$(df -BG --output=avail "$SCRATCH" | awk 'NR==2 {gsub("G", ""); print}')
-[[ "${free_gb:-0}" -ge "$need_gb" ]] || {
-  echo "ENV: need ${need_gb}GB free at $SCRATCH, have ${free_gb:-0}GB" >&2
+free_gib=$(df -g "$SCRATCH" 2>/dev/null | awk 'NR==2 {print $4}') ||
+  free_gib=$(df -BG --output=avail "$SCRATCH" | awk 'NR==2 {gsub("G", ""); print}')
+[[ "${free_gib:-0}" -ge "$need_gib" ]] || {
+  echo "ENV: need ${need_gib}GiB free at $SCRATCH, have ${free_gib:-0}GiB" >&2
   echo "     (${RATE_MBPS} MB/s x W=$W buffered, capped by the ${WATERMARK_PCT}% watermark, plus the kept stream for $DUR)" >&2
   exit 2
 }
@@ -103,6 +105,11 @@ bin/retrosamplercol --help >/dev/null 2>&1 || help_status=$?
   echo "     137 is macOS refusing a stale signature: rm the binary and make build again" >&2
   exit 2
 }
+# Before the port check, not after it: this script owns testbed-nats by
+# name, and one left behind by a kill -9 holds 4222 forever. Pre-cleaning
+# afterwards would wedge every subsequent run behind a port message that
+# blames the machine for a container this script is entitled to remove.
+docker rm -f testbed-nats >/dev/null 2>&1 || true
 for port in 4317 8888 4222; do
   nc -z 127.0.0.1 "$port" 2>/dev/null && {
     echo "ENV: something already listens on 127.0.0.1:$port" >&2
@@ -147,7 +154,6 @@ cleanup() {
 trap cleanup EXIT
 
 # --- bus: durable mode needs JetStream, -sd puts its store on disk ---
-docker rm -f testbed-nats >/dev/null 2>&1 || true
 docker run -d --rm --name testbed-nats -p 4222:4222 nats:2.12-alpine \
   -js -sd /tmp/js >/dev/null || {
   echo "ENV: could not start the testbed-nats container" >&2
@@ -277,9 +283,18 @@ counter_keeps=otelcol_processor_retrosampler_kept_local
 gauge_window=otelcol_processor_retrosampler_effective_window_seconds
 hist_age=otelcol_processor_retrosampler_flush_age_ratio
 missing=()
-for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$gauge_window" "$hist_age"; do
-  grep -q "^$series" "$SCRATCH/metrics.txt" || missing+=("$series")
+# Anchored on the WHOLE name - the next character has to be the label brace
+# or the value separator - because sum() and peak() match the name exactly
+# and a bare prefix check does not. A reader that started appending _total
+# or _bytes would satisfy "^name" while sum() found nothing, and the shed
+# and rss floors would both go green over a series they never read.
+for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$gauge_window"; do
+  grep -qE "^$series[{ ]" "$SCRATCH/metrics.txt" || missing+=("$series")
 done
+# The histogram is the exception: its base name only ever appears carrying
+# a _bucket, _sum or _count suffix, and it feeds a report rather than a
+# floor, so an absence here prints nothing instead of passing something.
+grep -q "^$hist_age" "$SCRATCH/metrics.txt" || missing+=("$hist_age")
 [[ "${#missing[@]}" -eq 0 ]] || {
   echo "ENV: the collector emitted none of: ${missing[*]}" >&2
   echo "     (a floor over an absent series reads 0 and passes while measuring nothing)" >&2
@@ -319,6 +334,13 @@ for series in "${sheds[@]}"; do
     'BEGIN {printf "%.10g\n", a + b}')
 done
 rss_max=$(peak "$gauge_rss" "$SCRATCH/samples.txt")
+# Nothing above validates samples.txt, and peak() over an empty file is 0,
+# which sails through a <= 4 GiB floor having measured no process at all.
+awk -v r="$rss_max" 'BEGIN {exit !(r > 0)}' || {
+  echo "ENV: no RSS samples in $SCRATCH/samples.txt - the sampler never read :8888" >&2
+  echo "     (a zero here would pass the memory floor while measuring nothing)" >&2
+  exit 2
+}
 rss_gib=$(awk -v r="$rss_max" 'BEGIN {printf "%.2f\n", r / 1073741824}')
 keeps=$(sum "$counter_keeps" "$SCRATCH/metrics.txt")
 
@@ -356,6 +378,17 @@ echo
 echo "=== ADR-004 r3 floors ==="
 floor throughput "$mbps" MB/s "v >= $RATE_MBPS" ">= $RATE_MBPS"
 floor sheds "$shed_total" events "v == 0" "== 0"
+# The one floor most likely to fail is the one a single number explains
+# least: a queue-full refusal is the shard workers falling behind, while
+# floor_protected and nothing_reclaimable are the disk ladder out of room.
+# Which of the three fired IS the question a reader has to answer before
+# they can judge the ==0 bound against ADR-007's design.
+if awk -v v="$shed_total" 'BEGIN {exit !(v > 0)}'; then
+  for series in "${sheds[@]}"; do
+    printf '    %-24s %s\n' "${series#otelcol_processor_retrosampler_}" \
+      "$(sum "$series" "$SCRATCH/metrics.txt")"
+  done
+fi
 floor rss "$rss_gib" GiB "v <= 4" "<= 4"
 floor "gc pause" "$maxpause" ms "v < 10" "< 10"
 floor "gc cpu" "$gccpu" % "v < 5" "< 5"
@@ -372,7 +405,7 @@ echo
 echo "=== observed, never a floor ==="
 printf '  effective window   %s s of a configured W=%s\n' \
   "$(sum "$gauge_window" "$SCRATCH/metrics.txt")" "$W"
-printf '  gc cycles          %s over %s s\n' "$gccycles" "$dur_s"
+printf '  gc cycles          %s over %s\n' "$gccycles" "$DUR"
 # The parked-intent population belongs next to the sheds because the two
 # move together: an intent parks when the flush channel is full, and every
 # parked one costs its shard a fresh whole-trace Collect on the next tick.
@@ -382,10 +415,21 @@ awk '/^# t=/ {t = $2} /_pending_flushes/ {if ($2 + 0 > m) {m = $2 + 0; at = t}}
   END {if (m > 0) printf "  pending peak       %d intents at %s\n", m, at}' \
   "$SCRATCH/samples.txt"
 # When the sheds happened, if they did: a burst while the pipeline warms
-# reads very differently from one that starts once the buffer is full.
-awk '/^# t=/ {t = $2} /_shed_/ {v[t] += $2}
-  END {for (k in v) if (v[k] > 0) printf "  sheds by %-8s %s\n", k, v[k]}' \
-  "$SCRATCH/samples.txt" | sort -t= -k2 -n | head -5
+# reads very differently from one that accumulates once the buffer is
+# full, and only a timeline spanning the WHOLE run tells those apart. The
+# samples are decimated to about eight rows plus the last one - a head -N
+# would have shown the first forty seconds of an eight-minute run and
+# called it a shape.
+if awk -v v="$shed_total" 'BEGIN {exit !(v > 0)}'; then
+  awk '/^# t=/ {t = $2; if (!(t in seen)) {seen[t] = 1; order[++n] = t}}
+    /_shed_/ {v[t] += $2}
+    END {
+      step = int(n / 8)
+      if (step < 1) step = 1
+      for (i = 1; i <= n; i += step) printf "  sheds by %-8s %s\n", order[i], v[order[i]] + 0
+      if ((n - 1) % step != 0) printf "  sheds by %-8s %s\n", order[n], v[order[n]] + 0
+    }' "$SCRATCH/samples.txt"
+fi
 # The ADR-011 r9 W instrument: mass gathering near 1.0 says keeps are only
 # just beating expiry and W is too tight. Reported, never gated - the
 # whole point is to close ADR-003 r3 (W=5m, open) on data.
