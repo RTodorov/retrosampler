@@ -53,12 +53,17 @@ type genParams struct {
 // summary is the JSON document the run prints on stdout. Tasks 11 and 12
 // consume it, so field names and types are a contract.
 type summary struct {
-	Traces                       int      `json:"traces"`
-	ErrorTraces                  int      `json:"error_traces"`
-	SlowSpanTraces               int      `json:"slow_span_traces"`
-	TraceLatencyTraces           int      `json:"trace_latency_traces"`
-	HealthyTraces                int      `json:"healthy_traces"`
-	SpansPerEndpoint             []int    `json:"spans_per_endpoint"`
+	Traces             int   `json:"traces"`
+	ErrorTraces        int   `json:"error_traces"`
+	SlowSpanTraces     int   `json:"slow_span_traces"`
+	TraceLatencyTraces int   `json:"trace_latency_traces"`
+	HealthyTraces      int   `json:"healthy_traces"`
+	SpansPerEndpoint   []int `json:"spans_per_endpoint"`
+	// BytesSent counts the OTLP protobuf payload
+	// (ptrace.ProtoMarshaler.TracesSize) of succeeded exports only. It
+	// excludes gRPC framing, HTTP/2 and TLS overhead, and does not
+	// double-count retries, so an MB/s floor computed from it reads
+	// slightly below true wire throughput.
 	BytesSent                    int64    `json:"bytes_sent"`
 	ElapsedSeconds               float64  `json:"elapsed_seconds"`
 	ExpectedKeptSpansPerEndpoint []int    `json:"expected_kept_spans_per_endpoint"`

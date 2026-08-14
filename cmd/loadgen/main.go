@@ -148,8 +148,10 @@ func (o options) validate() error {
 		return usagef("class counts must not be negative")
 	case o.errorPct < 0 || o.errorPct > 100:
 		return usagef("--error-pct must be between 0 and 100")
-	case o.errorPct > 0 && o.errorTraces > 0:
-		return usagef("--error-pct and --error-traces are mutually exclusive")
+	// paramsFor derives the whole class mix from --error-pct alone, so any
+	// absolute count set alongside it would be silently discarded.
+	case o.errorPct > 0 && o.errorTraces+o.slowSpanTraces+o.traceLatencyTraces > 0:
+		return usagef("--error-pct and the absolute class counts (--error-traces/--slow-span-traces/--trace-latency-traces) are mutually exclusive")
 	}
 
 	// Absolute class counts name a share of a known total, which --duration

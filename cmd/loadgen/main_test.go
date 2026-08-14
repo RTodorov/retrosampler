@@ -266,6 +266,10 @@ func TestRunRejectsBadFlags(t *testing.T) {
 		"negative class":      {"--endpoints", "h:1", "--traces", "1", "--error-traces", "-1"},
 		"pct out of range":    {"--endpoints", "h:1", "--traces", "1", "--error-pct", "101"},
 		"pct and count":       {"--endpoints", "h:1", "--traces", "10", "--error-pct", "10", "--error-traces", "1"},
+		"pct and slow count":  {"--endpoints", "h:1", "--traces", "10", "--error-pct", "10", "--slow-span-traces", "1"},
+		"pct and latency count": {
+			"--endpoints", "h:1", "--traces", "10", "--error-pct", "10", "--trace-latency-traces", "1",
+		},
 		"counts with duration": {
 			"--endpoints", "h:1", "--duration", "1s", "--error-traces", "1",
 		},
