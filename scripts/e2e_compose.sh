@@ -152,6 +152,9 @@ jq -e -s 'length == 1' >/dev/null 2>&1 <<<"$summary2" || {
 # 1 s tick, so the publish DRAIN has to fail against a dead server too and
 # not just the detection that queued it.
 sleep 5
+want1=$(jq -r '.expected_kept_spans_per_endpoint[0]' <<<"$summary2")
+want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary2")
+assert_wanted "the outage-window load"
 # Instance 2 stays off the bus across the bounce, and this is what makes
 # the phase test replay at all. Without it the two clients race to
 # reconnect: when the subscriber wins it takes the keeps LIVE, nothing is
@@ -162,13 +165,32 @@ sleep 5
 # the one path left that can complete wave 2 on instance 2.
 compose pause retrosampler-2 >/dev/null
 compose start nats >/dev/null
-# Long enough for instance 1 to redial (1 s reconnect wait) and drain its
-# parked intents into the stream while the subscriber is still frozen.
-sleep 10
+# Observed, never slept through. The flusher publishes BEFORE it flushes
+# and re-parks both bits together on failure, so instance 1's own kept
+# spans cannot appear until its broadcasts have been accepted by the
+# stream — which makes its kept count the one directly observable proof
+# that there is a backlog for instance 2 to replay. Unpausing on a timer
+# instead would silently degrade the phase to a live-broadcast test on any
+# machine slower than the timer.
+drained=0
+for poll in $(seq 1 90); do
+  [[ "$(kept 1 "$summary2")" -ge "$want1" ]] && {
+    drained=$poll
+    break
+  }
+  sleep 1
+done
+[[ "$drained" -gt 0 ]] || {
+  echo "FAIL phase2: instance 1 never drained its parked keeps after the bounce" >&2
+  echo "  want $want1 kept spans, got $(kept 1 "$summary2")" >&2
+  compose logs nats retrosampler-1 | tail -100
+  exit 1
+}
+# Printed, because the number is the evidence: a drain that completed on
+# poll 1 would mean instance 1 had flushed before the bounce, and this
+# whole freeze would be guarding nothing.
+echo "phase2: instance 1 drained $want1 kept spans by poll $drained after the bounce"
 compose unpause retrosampler-2 >/dev/null
-want1=$(jq -r '.expected_kept_spans_per_endpoint[0]' <<<"$summary2")
-want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary2")
-assert_wanted "the outage-window load"
 # 90 polls, not phase 1's 60: parked intents drain on 1 s ticks behind a
 # reconnect backoff. If CI flakes, the bound is the knob, never the
 # assertion.
