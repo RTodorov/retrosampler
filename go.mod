@@ -1,6 +1,6 @@
 module github.com/rtodorov/retrosampler
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/nats-io/nats-server/v2 v2.14.5
