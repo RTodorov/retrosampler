@@ -274,11 +274,12 @@ SAMPLER_PID=""
 # present, checked below - a name spelled differently here would read as 0
 # and pass the shed floors while measuring nothing at all.
 gauge_rss=otelcol_process_memory_rss
-sheds=(
+ladder_sheds=(
   otelcol_processor_retrosampler_shed_floor_protected
   otelcol_processor_retrosampler_shed_nothing_reclaimable
-  otelcol_processor_retrosampler_shed_queue_full
 )
+queue_shed=otelcol_processor_retrosampler_shed_queue_full
+sheds=("${ladder_sheds[@]}" "$queue_shed")
 counter_keeps=otelcol_processor_retrosampler_kept_local
 gauge_window=otelcol_processor_retrosampler_effective_window_seconds
 hist_age=otelcol_processor_retrosampler_flush_age_ratio
@@ -328,11 +329,13 @@ peak() { # $1 = series, $2 = file; maximum over every sample
 mbps=0
 [[ "$have_summary" -eq 0 ]] ||
   mbps=$(jq -r '.bytes_sent / .elapsed_seconds / 1000000' "$SCRATCH/summary.json")
-shed_total=0
-for series in "${sheds[@]}"; do
-  shed_total=$(awk -v a="$shed_total" -v b="$(sum "$series" "$SCRATCH/metrics.txt")" \
+ladder_total=0
+for series in "${ladder_sheds[@]}"; do
+  ladder_total=$(awk -v a="$ladder_total" -v b="$(sum "$series" "$SCRATCH/metrics.txt")" \
     'BEGIN {printf "%.10g\n", a + b}')
 done
+queue_total=$(sum "$queue_shed" "$SCRATCH/metrics.txt")
+shed_total=$(awk -v a="$ladder_total" -v b="$queue_total" 'BEGIN {printf "%.10g\n", a + b}')
 rss_max=$(peak "$gauge_rss" "$SCRATCH/samples.txt")
 # Nothing above validates samples.txt, and peak() over an empty file is 0,
 # which sails through a <= 4 GiB floor having measured no process at all.
@@ -371,18 +374,23 @@ floor() { # $1 = name, $2 = value, $3 = unit, $4 = awk test over v, $5 = bound
     fail=1
     echo "FLOOR: $1 = $2 $3, need $5" >&2
   }
-  printf '  %-12s %12s %-6s %-12s %s\n' "$1" "$2" "$3" "$5" "$verdict"
+  printf '  %-20s %12s %-8s %-12s %s\n' "$1" "$2" "$3" "$5" "$verdict"
 }
 
 echo
 echo "=== ADR-004 r3 floors ==="
 floor throughput "$mbps" MB/s "v >= $RATE_MBPS" ">= $RATE_MBPS"
-floor sheds "$shed_total" events "v == 0" "== 0"
-# The one floor most likely to fail is the one a single number explains
-# least: a queue-full refusal is the shard workers falling behind, while
-# floor_protected and nothing_reclaimable are the disk ladder out of room.
-# Which of the three fired IS the question a reader has to answer before
-# they can judge the ==0 bound against ADR-007's design.
+# The ladder's rungs are one number only until one of them fires, and they
+# do not mean the same thing: floor_protected and nothing_reclaimable are
+# the disk ladder out of room, which is the data-loss risk the floor exists
+# to catch, while a queue_full refusal is ADR-007's designed backpressure -
+# the receiver retried every one of the 126.25 MB/s run's 2234 and
+# conservation held - so it is reported at every rate and gates at none
+# (operator ruling, 2026-08-14). The per-series breakdown and the timeline
+# below print whenever anything shed, gate or no gate.
+floor "ladder sheds" "$ladder_total" events "v == 0" "== 0"
+printf '  %-20s %12s %-8s %-12s %s\n' \
+  "queue_full refusals" "$queue_total" events "not a floor" REPORTED
 if awk -v v="$shed_total" 'BEGIN {exit !(v > 0)}'; then
   for series in "${sheds[@]}"; do
     printf '    %-24s %s\n' "${series#otelcol_processor_retrosampler_}" \
