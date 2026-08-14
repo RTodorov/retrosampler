@@ -261,6 +261,24 @@ func (p *retroProcessor) bindTelemetry(ts component.TelemetrySettings) error {
 	return nil
 }
 
+// ageRecorder hands the flusher the one synchronous instrument in the
+// plane, or nil where the builder was never bound — every processor test
+// that skips bindTelemetry, and any future construction path that does
+// the same. Resolved once at start rather than read per flush, so the
+// flusher never touches the builder itself.
+//
+// Unlike the async callbacks there is no set-pointer guard: nothing can
+// reach this before start (the flusher is built there) and the drain at
+// shutdown is exactly when a last flush still deserves recording.
+func (p *retroProcessor) ageRecorder() func(float64) {
+	if p.tb == nil {
+		return nil
+	}
+	return func(ratio float64) {
+		p.tb.ProcessorRetrosamplerFlushAgeRatio.Record(context.Background(), ratio)
+	}
+}
+
 // unbindTelemetry drops the callbacks. Repeat calls are safe — the SDK
 // unregistration is idempotent — which matters because shutdown reaches
 // here on both its no-op and its drained path.

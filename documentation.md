@@ -118,6 +118,14 @@ Bytes reclaimed by normal window expiry.
 | ---- | ----------- | ---------- | --------- | --------- |
 | By | Sum | Int | true | Development |
 
+### otelcol.processor.retrosampler.flush.age.ratio
+
+Age of each flushed fragment batch's oldest span as a fraction of the configured W, recorded at flush. Mass near 1.0 means keeps barely beat expiry - the W-validation instrument (ADR-011 rule 9).
+
+| Unit | Metric Type | Value Type | Stability |
+| ---- | ----------- | ---------- | --------- |
+| 1 | Histogram | Double | Development |
+
 ### otelcol.processor.retrosampler.flush.errors
 
 Flush attempts the next consumer rejected.

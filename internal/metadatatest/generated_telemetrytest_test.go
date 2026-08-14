@@ -136,6 +136,7 @@ func TestSetupTelemetry(t *testing.T) {
 		observer.Observe(1)
 		return nil
 	}))
+	tb.ProcessorRetrosamplerFlushAgeRatio.Record(context.Background(), 1)
 	AssertEqualProcessorRetrosamplerAppendErrors(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
@@ -177,6 +178,9 @@ func TestSetupTelemetry(t *testing.T) {
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorRetrosamplerExpiredBytes(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualProcessorRetrosamplerFlushAgeRatio(t, testTel,
+		[]metricdata.HistogramDataPoint[float64]{{}}, metricdatatest.IgnoreValue(),
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualProcessorRetrosamplerFlushErrors(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},

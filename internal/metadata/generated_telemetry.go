@@ -42,6 +42,7 @@ type TelemetryBuilder struct {
 	ProcessorRetrosamplerEarlyExpiredSegments      metric.Int64ObservableCounter
 	ProcessorRetrosamplerEffectiveWindowSeconds    metric.Int64ObservableGauge
 	ProcessorRetrosamplerExpiredBytes              metric.Int64ObservableCounter
+	ProcessorRetrosamplerFlushAgeRatio             metric.Float64Histogram
 	ProcessorRetrosamplerFlushErrors               metric.Int64ObservableCounter
 	ProcessorRetrosamplerFlushRetries              metric.Int64ObservableCounter
 	ProcessorRetrosamplerFlushedSpans              metric.Int64ObservableCounter
@@ -615,6 +616,13 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 		"otelcol.processor.retrosampler.expired.bytes",
 		metric.WithDescription("Bytes reclaimed by normal window expiry. [Development]"),
 		metric.WithUnit("By"),
+	)
+	errs = errors.Join(errs, err)
+	builder.ProcessorRetrosamplerFlushAgeRatio, err = builder.meter.Float64Histogram(
+		"otelcol.processor.retrosampler.flush.age.ratio",
+		metric.WithDescription("Age of each flushed fragment batch's oldest span as a fraction of the configured W, recorded at flush. Mass near 1.0 means keeps barely beat expiry - the W-validation instrument (ADR-011 rule 9). [Development]"),
+		metric.WithUnit("1"),
+		metric.WithExplicitBucketBoundaries([]float64{0.1, 0.25, 0.5, 0.75, 0.9, 1, 1.25, 1.5}...),
 	)
 	errs = errors.Join(errs, err)
 	builder.ProcessorRetrosamplerFlushErrors, err = builder.meter.Int64ObservableCounter(

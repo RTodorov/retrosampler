@@ -7,9 +7,11 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/rtodorov/retrosampler/internal/bus"
@@ -27,6 +29,15 @@ type flusher struct {
 	next consumer.Traces
 	b    bus.Bus
 
+	// window is the CONFIGURED W, the denominator of every age ratio —
+	// never the effective one, which shrinks under the overload ladder.
+	// A moving denominator would make the buckets incomparable across a
+	// shed episode, and effective_window.seconds already reports the
+	// shrink on its own.
+	window    time.Duration
+	now       func() time.Time
+	recordAge func(float64) // nil where there is no telemetry to record into
+
 	stopOnce sync.Once
 	stopc    chan struct{}
 	done     chan struct{}
@@ -38,11 +49,17 @@ type flusher struct {
 	decodeErrors   atomic.Uint64
 }
 
+// newFlusher takes the age-ratio recorder as a plain func rather than
+// the generated instrument: the flusher owes telemetry one number, and a
+// nil recordAge or a non-positive window turns the measurement off
+// entirely — which is how every unit test here runs without a meter.
 func newFlusher(jobs <-chan *shards.FlushJob, set *shards.Set,
 	next consumer.Traces, b bus.Bus,
+	window time.Duration, now func() time.Time, recordAge func(float64),
 ) *flusher {
 	return &flusher{
 		jobs: jobs, set: set, next: next, b: b,
+		window: window, now: now, recordAge: recordAge,
 		stopc: make(chan struct{}), done: make(chan struct{}),
 	}
 }
@@ -109,6 +126,7 @@ func (fl *flusher) process(j *shards.FlushJob) {
 	if spans <= 0 {
 		return
 	}
+	fl.recordAgeRatio(td)
 	if err := fl.next.ConsumeTraces(ctx, td); err != nil {
 		fl.flushErrors.Add(1)
 		if !consumererror.IsPermanent(err) {
@@ -118,6 +136,50 @@ func (fl *flusher) process(j *shards.FlushJob) {
 	}
 	// Guard above: spans > 0 here, so the conversion cannot change sign.
 	fl.flushedSpans.Add(uint64(spans))
+}
+
+// recordAgeRatio samples the W instrument (ADR-011 r9): the age of the
+// batch's oldest span — the one nearest expiry — as a fraction of the
+// configured window. Mass gathering near 1.0 says keeps are only just
+// beating expiry and W is too tight.
+//
+// Sampled per flush ATTEMPT, before the consume rather than after it,
+// and both halves of that are deliberate. Fragments behind a failed
+// flush go back on the shard and keep aging on disk, so a retry's higher
+// ratio is a real observation and the samples nearest 1.0 are exactly
+// the ones a retry loop produces; recording only accepted batches would
+// go quiet during the outage that puts W most at risk. Sampling before
+// the consume also keeps the exporter's own latency out of the number,
+// which measures retention headroom and not downstream speed. The cost
+// is that one trace retried N times contributes N samples: this is a
+// distribution over flush attempts, not over traces, and flush.retries
+// is what counts the retries themselves.
+func (fl *flusher) recordAgeRatio(td ptrace.Traces) {
+	// All three are needed to compute anything; any one missing is a
+	// flusher built without telemetry, which is how the unit tests run.
+	if fl.recordAge == nil || fl.now == nil || fl.window <= 0 {
+		return
+	}
+	var oldest pcommon.Timestamp
+	for _, rs := range td.ResourceSpans().All() {
+		for _, ss := range rs.ScopeSpans().All() {
+			for _, sp := range ss.Spans().All() {
+				if st := sp.StartTimestamp(); st != 0 && (oldest == 0 || st < oldest) {
+					oldest = st
+				}
+			}
+		}
+	}
+	if oldest == 0 {
+		// No span in the batch carries a start. An age nobody knows is
+		// not an age of zero, and a zero here would pile mass at the
+		// healthy end of exactly the distribution being watched.
+		return
+	}
+	// A span stamped in the future is clock skew, not negative age
+	// (ADR-008 r7 hygiene).
+	age := max(fl.now().Sub(oldest.AsTime()), 0)
+	fl.recordAge(age.Seconds() / fl.window.Seconds())
 }
 
 // retry re-parks need on the owning shard; the fragments are on disk,

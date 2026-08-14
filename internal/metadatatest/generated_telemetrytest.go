@@ -239,6 +239,21 @@ func AssertEqualProcessorRetrosamplerExpiredBytes(t *testing.T, tt *componenttes
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
 
+func AssertEqualProcessorRetrosamplerFlushAgeRatio(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.HistogramDataPoint[float64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.flush.age.ratio",
+		Description: "Age of each flushed fragment batch's oldest span as a fraction of the configured W, recorded at flush. Mass near 1.0 means keeps barely beat expiry - the W-validation instrument (ADR-011 rule 9). [Development]",
+		Unit:        "1",
+		Data: metricdata.Histogram[float64]{
+			Temporality: metricdata.CumulativeTemporality,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.flush.age.ratio")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
 func AssertEqualProcessorRetrosamplerFlushErrors(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
 	want := metricdata.Metrics{
 		Name:        "otelcol.processor.retrosampler.flush.errors",
