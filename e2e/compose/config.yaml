@@ -11,6 +11,12 @@ processors:
     # Pinned: the shard count defaults to GOMAXPROCS, and shards x
     # segment_size must stay under the disk_budget watermark.
     shards: 4
+    # baseline_rate stays absent (= 0): the gate counts kept spans exactly.
+    bus:
+      type: nats
+      nats:
+        url: nats://nats:4222
+        mode: durable
 
 exporters:
   file:
