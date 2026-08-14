@@ -5,6 +5,8 @@
 # only instance 1 receives the error marker, so instance 2 holds fragments
 # that look healthy in isolation. Those fragments reaching the exporter is
 # the keep bus working — nothing local can explain it.
+# Phase 2 (ADR-011 r2): a second wave is detected while the bus is stopped,
+# and the bounce has to make both instances whole again.
 # Retention (ADR-009): every span of a kept trace out, every healthy one
 # absent.
 # Functional assertions only — perf floors live in make testbed (ADR-004 r4).
@@ -59,15 +61,43 @@ leaked() { # $1 = kept ids, $2 = instance; spans outside every kept set
     '[.[].resourceSpans[]?.scopeSpans[]?.spans[]? | select(((.traceId | ascii_downcase) as $t | $ids | index($t)) | not)] | length' \
     "out/$2/traces.json"
 }
-assert_kept() { # $1 = which reading; reads the k/want globals
+assert_kept() { # $1 = which reading; reads the phase/k/want globals
   [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]] || {
-    echo "FAIL phase1: cross-instance kept conservation violated ($1)" >&2
+    echo "FAIL $phase: kept-span conservation violated ($1)" >&2
     echo "  instance 1: want $want1 kept spans got $k1" >&2
     echo "  instance 2: want $want2 kept spans got $k2" >&2
     compose logs nats retrosampler-1 retrosampler-2 | tail -100
     exit 1
   }
 }
+# Two consecutive equal polls, never one: a loop that breaks the instant
+# the numbers match cannot see what arrives next, and late or duplicate
+# delivery is exactly what the replay phase produces.
+converge() { # $1 = summary, $2 = poll budget; leaves the last reading in k1/k2
+  local stable=0
+  k1=0
+  k2=0
+  for _ in $(seq 1 "$2"); do
+    k1=$(kept 1 "$1")
+    k2=$(kept 2 "$1")
+    if [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]]; then
+      stable=$((stable + 1))
+      [[ "$stable" -ge 2 ]] && return
+    else
+      stable=0
+    fi
+    sleep 1
+  done
+}
+# A wave that expected nothing would let every assert below pass on an
+# empty output directory.
+assert_wanted() { # $1 = which wave; reads the want globals
+  [[ "$want1" -gt 0 && "$want2" -gt 0 ]] || {
+    echo "FAIL $phase: $1 expected no kept spans: $want1 + $want2" >&2
+    exit 1
+  }
+}
+phase=phase1
 summary1=$(run_loadgen 1)
 jq -e -s 'length == 1' >/dev/null 2>&1 <<<"$summary1" || {
   echo "FAIL phase1: the loadgen printed no summary document" >&2
@@ -76,29 +106,8 @@ jq -e -s 'length == 1' >/dev/null 2>&1 <<<"$summary1" || {
 }
 want1=$(jq -r '.expected_kept_spans_per_endpoint[0]' <<<"$summary1")
 want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary1")
-# A run that expected nothing would let every assert below pass on an
-# empty output directory.
-[[ "$want1" -gt 0 && "$want2" -gt 0 ]] || {
-  echo "FAIL phase1: the load expected no kept spans: $want1 + $want2" >&2
-  exit 1
-}
-# Two consecutive equal polls, never one: a loop that breaks the instant
-# the numbers match cannot see what arrives next, and late or duplicate
-# delivery is exactly what a replay phase produces.
-k1=0
-k2=0
-stable=0
-for _ in $(seq 1 60); do
-  k1=$(kept 1 "$summary1")
-  k2=$(kept 2 "$summary1")
-  if [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]]; then
-    stable=$((stable + 1))
-    [[ "$stable" -ge 2 ]] && break
-  else
-    stable=0
-  fi
-  sleep 1
-done
+assert_wanted "the load"
+converge "$summary1" 60
 assert_kept "on convergence"
 ids1=$(jq -c '.kept_trace_ids' <<<"$summary1")
 l1=$(leaked "$ids1" 1)
@@ -117,3 +126,76 @@ k1=$(kept 1 "$summary1")
 k2=$(kept 2 "$summary1")
 assert_kept "settled"
 echo "phase1 OK: $k1 + $k2 kept spans across instances, healthy spans dropped"
+
+# Phase 2 (ADR-011 r2): the second wave is detected with the bus stopped.
+# Instance 1's publish intents park and its own flush parks behind them,
+# so nothing of this wave reaches either exporter while the outage lasts;
+# instance 2 holds fragments nothing has told it to keep. The bounce is
+# what makes both whole — JetStream file storage outlives the container
+# (compose.yaml's named volume) and the ordered consumer replays
+# deliver-all.
+phase=phase2
+compose stop nats >/dev/null
+# Seed 1001, not 2: the loadgen seeds each BATCH with seed+batchIndex, so
+# wave 1 has already used 1 through 60 (6000 traces in batches of 100) and
+# seed 2 would re-emit 59 of those batches under their original ids. Those
+# traces are decided from phase 1, so instance 2 would forward the second
+# wave's fragments without ever consulting the bus — the phase would pass
+# on ids that prove nothing, and its counts would double.
+summary2=$(run_loadgen 1001)
+jq -e -s 'length == 1' >/dev/null 2>&1 <<<"$summary2" || {
+  echo "FAIL phase2: the loadgen printed no summary document" >&2
+  echo "  stdout was: $summary2" >&2
+  exit 1
+}
+# Hold the outage past the loadgen's exit: the parked intents retry on the
+# 1 s tick, so the publish DRAIN has to fail against a dead server too and
+# not just the detection that queued it.
+sleep 5
+# Instance 2 stays off the bus across the bounce, and this is what makes
+# the phase test replay at all. Without it the two clients race to
+# reconnect: when the subscriber wins it takes the keeps LIVE, nothing is
+# replayed from the stream, and an at_most_once fleet — whose reconnect
+# buffer flushes the same broadcasts publisher-side — passes this assert
+# too (measured, both ways). Frozen here, the broadcasts can only land
+# while nobody is subscribed, so the ≤W backlog replay of ADR-011 r2 is
+# the one path left that can complete wave 2 on instance 2.
+compose pause retrosampler-2 >/dev/null
+compose start nats >/dev/null
+# Long enough for instance 1 to redial (1 s reconnect wait) and drain its
+# parked intents into the stream while the subscriber is still frozen.
+sleep 10
+compose unpause retrosampler-2 >/dev/null
+want1=$(jq -r '.expected_kept_spans_per_endpoint[0]' <<<"$summary2")
+want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary2")
+assert_wanted "the outage-window load"
+# 90 polls, not phase 1's 60: parked intents drain on 1 s ticks behind a
+# reconnect backoff. If CI flakes, the bound is the knob, never the
+# assertion.
+converge "$summary2" 90
+assert_kept "wave 2, on convergence"
+# Both waves' ids, so a wave-2 span outside its own kept set is a leak and
+# not counted as one of wave 1's.
+idsAll=$(jq -c -n --argjson a "$(jq -c '.kept_trace_ids' <<<"$summary1")" \
+  --argjson b "$(jq -c '.kept_trace_ids' <<<"$summary2")" '$a + $b')
+l1=$(leaked "$idsAll" 1)
+l2=$(leaked "$idsAll" 2)
+[[ "$l1" -eq 0 && "$l2" -eq 0 ]] || {
+  echo "FAIL phase2: healthy spans leaked through retention" >&2
+  echo "  instance 1: $l1 unkept spans" >&2
+  echo "  instance 2: $l2 unkept spans" >&2
+  exit 1
+}
+k1=$(kept 1 "$summary2")
+k2=$(kept 2 "$summary2")
+assert_kept "wave 2, settled"
+# The replay is deliver-all, so wave 1's keeps cross the bus a second time.
+# Re-reading wave 1 here is what proves the decided set absorbed them:
+# nothing above can see a duplicate of a trace that was already complete.
+want1=$(jq -r '.expected_kept_spans_per_endpoint[0]' <<<"$summary1")
+want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary1")
+k1=$(kept 1 "$summary1")
+k2=$(kept 2 "$summary1")
+assert_kept "wave 1, re-read after the replay"
+echo "phase2 OK: wave-2 keeps conserved across the bus outage, replay duplicates absorbed"
+echo "e2e-compose OK: cross-instance keeps + outage replay"
