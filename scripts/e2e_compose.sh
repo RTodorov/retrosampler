@@ -11,6 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../e2e/compose"
 TRACES=6000
+# The kept classes must stay under the loadgen's 10000-id summary cap:
+# past it kept_trace_ids stops listing, and every assert here reads that
+# list. Counts alone stay exact, so the cap fails quietly.
 ERRORS=600
 SPANS=4
 compose() { docker compose -f compose.yaml "$@"; }
@@ -56,8 +59,17 @@ leaked() { # $1 = kept ids, $2 = instance; spans outside every kept set
     '[.[].resourceSpans[]?.scopeSpans[]?.spans[]? | select(((.traceId | ascii_downcase) as $t | $ids | index($t)) | not)] | length' \
     "out/$2/traces.json"
 }
+assert_kept() { # $1 = which reading; reads the k/want globals
+  [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]] || {
+    echo "FAIL phase1: cross-instance kept conservation violated ($1)" >&2
+    echo "  instance 1: want $want1 kept spans got $k1" >&2
+    echo "  instance 2: want $want2 kept spans got $k2" >&2
+    compose logs nats retrosampler-1 retrosampler-2 | tail -100
+    exit 1
+  }
+}
 summary1=$(run_loadgen 1)
-jq -e . >/dev/null 2>&1 <<<"$summary1" || {
+jq -e -s 'length == 1' >/dev/null 2>&1 <<<"$summary1" || {
   echo "FAIL phase1: the loadgen printed no summary document" >&2
   echo "  stdout was: $summary1" >&2
   exit 1
@@ -70,21 +82,24 @@ want2=$(jq -r '.expected_kept_spans_per_endpoint[1]' <<<"$summary1")
   echo "FAIL phase1: the load expected no kept spans: $want1 + $want2" >&2
   exit 1
 }
+# Two consecutive equal polls, never one: a loop that breaks the instant
+# the numbers match cannot see what arrives next, and late or duplicate
+# delivery is exactly what a replay phase produces.
 k1=0
 k2=0
+stable=0
 for _ in $(seq 1 60); do
   k1=$(kept 1 "$summary1")
   k2=$(kept 2 "$summary1")
-  [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]] && break
+  if [[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]]; then
+    stable=$((stable + 1))
+    [[ "$stable" -ge 2 ]] && break
+  else
+    stable=0
+  fi
   sleep 1
 done
-[[ "$k1" -eq "$want1" && "$k2" -eq "$want2" ]] || {
-  echo "FAIL phase1: cross-instance kept conservation violated" >&2
-  echo "  instance 1: want $want1 kept spans got $k1" >&2
-  echo "  instance 2: want $want2 kept spans got $k2" >&2
-  compose logs nats retrosampler-1 retrosampler-2 | tail -100
-  exit 1
-}
+assert_kept "on convergence"
 ids1=$(jq -c '.kept_trace_ids' <<<"$summary1")
 l1=$(leaked "$ids1" 1)
 l2=$(leaked "$ids1" 2)
@@ -94,4 +109,11 @@ l2=$(leaked "$ids1" 2)
   echo "  instance 2: $l2 unkept spans" >&2
   exit 1
 }
+# The last word on the counts, after the leak assert rather than before:
+# leaked() selects the ids OUTSIDE the kept set, so a second copy of a
+# kept trace is invisible to it. Only kept() can see a duplicate, so the
+# final kept() reading has to be the final reading.
+k1=$(kept 1 "$summary1")
+k2=$(kept 2 "$summary1")
+assert_kept "settled"
 echo "phase1 OK: $k1 + $k2 kept spans across instances, healthy spans dropped"
