@@ -81,3 +81,11 @@ linters:
       - path: _test\.go$
         linters: [forbidigo]
         text: panic
+      # Scope correction for a main package the processor-discipline rules
+      # never contemplated: the ADR-001 rule table exempts os.Exit inside main,
+      # and factory.go above is the same shape for the clock. Narrow on
+      # purpose - gen.go stays under the time.Now rule, which is what keeps
+      # the generator clock-free. A future cmd tool gets its own line.
+      - path: ^cmd/loadgen/main\.go$
+        linters: [forbidigo]
+        text: (time.Now|os.Exit)
