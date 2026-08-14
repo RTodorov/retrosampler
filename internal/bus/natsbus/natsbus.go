@@ -50,9 +50,9 @@ type Client struct {
 	js jetstream.JetStream
 
 	// inFn counts in-flight fn deliveries. The durable cancel consults it
-	// to skip its wait when the cancel comes from inside fn, which cannot
-	// wait for fn's own return; core-mode wait semantics belong to the
-	// hardening tier (ADR-011 r5).
+	// to skip its wait when the cancel comes from inside fn; see that
+	// cancel for why the guard is belt-and-braces rather than
+	// load-bearing.
 	inFn atomic.Int32
 
 	// subsMu guards subs, the live core subscriptions Dropped sums over.
@@ -298,12 +298,20 @@ func (c *Client) subscribeDurable(fn func(id [16]byte, reason byte)) (func(), er
 		once.Do(func() {
 			stop()
 			close(quit)
+			// Skip the wait when the cancel came from inside fn, which
+			// cannot wait for fn's own return. The guard is
+			// belt-and-braces and NOT load-bearing against nats.go as it
+			// stands: fn runs on the consumer's dispatcher goroutine, and
+			// ConsumeContext.Stop does not join that goroutine, so <-done
+			// completes with fn still on the stack either way. Removing
+			// the guard leaves the hardening tier green — it is kept for
+			// a future Stop that does join its dispatcher. What pins the
+			// property itself, that a cancel from inside fn returns
+			// rather than deadlocking, is the tier and not this line
+			// (ADR-011 r5).
 			if c.inFn.Load() == 0 {
 				<-done
 			}
-			// A cancel from inside fn cannot wait for fn's own return;
-			// with a delivery in flight the wait is skipped after
-			// signalling stop (pinned by the hardening tier).
 		})
 	}
 	return cancel, nil
