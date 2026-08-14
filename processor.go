@@ -195,8 +195,9 @@ func (p *retroProcessor) start(ctx context.Context, _ component.Host) error {
 	})
 	if err != nil {
 		err = errors.Join(err, p.fl.stop(context.Background()), set.Shutdown(context.Background()))
-		// Closed last here too: the flusher above may still have been
-		// publishing over it.
+		// Closed after the drains, as shutdown does. Nothing can have
+		// published over it yet — the set was never handed out — but one
+		// teardown order in this file is worth the two lines it costs.
 		p.closeBus(ctx)
 		return err
 	}
