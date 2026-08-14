@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -377,6 +378,160 @@ func TestShutdownTwiceIsSafeAndPostShutdownRefuses(t *testing.T) {
 	_, err := p.processTraces(context.Background(), td)
 	require.ErrorIs(t, err, errOverloaded)
 	assert.Zero(t, sink.SpanCount())
+}
+
+// lifecycleBus is a Loopback that records the lifecycle calls a bus with
+// a connection behind it receives: the Start it is owed, the publishes
+// it carries, the cancel that retires the subscription and the Close
+// that ends it. The recorded ORDER is the point — every one of these
+// steps is invisible in its own right, and getting them out of order
+// costs keeps rather than raising an error.
+type lifecycleBus struct {
+	bus.Bus
+	startErr error
+	// closeGate, when non-nil, wedges Close until it is closed;
+	// onClose runs inside Close, ahead of the gate.
+	closeGate chan struct{}
+	onClose   func()
+
+	mu     sync.Mutex
+	events []string
+}
+
+func newLifecycleBus() *lifecycleBus { return &lifecycleBus{Bus: bus.NewLoopback()} }
+
+func (l *lifecycleBus) record(ev string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, ev)
+}
+
+func (l *lifecycleBus) recorded() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.events)
+}
+
+func (l *lifecycleBus) Start(context.Context) error {
+	l.record("start")
+	return l.startErr
+}
+
+func (l *lifecycleBus) Close() error {
+	l.record("close")
+	if l.onClose != nil {
+		l.onClose()
+	}
+	if l.closeGate != nil {
+		<-l.closeGate
+	}
+	return nil
+}
+
+func (l *lifecycleBus) Publish(ctx context.Context, id [16]byte, reason byte) error {
+	l.record("publish")
+	return l.Bus.Publish(ctx, id, reason)
+}
+
+func (l *lifecycleBus) Subscribe(fn func(id [16]byte, reason byte)) (func(), error) {
+	cancel, err := l.Bus.Subscribe(fn)
+	if err != nil {
+		return nil, err
+	}
+	return func() { l.record("cancel"); cancel() }, nil
+}
+
+// A bus with a connection gets a lifecycle: dialled before anything
+// subscribes to it, closed only once the drains that use it are done.
+// Both halves fail quietly otherwise — an undialled client refuses every
+// publish, and an unclosed one outlives the collector's shutdown.
+func TestProcessorStartsAndClosesBus(t *testing.T) {
+	lb := newLifecycleBus()
+	sink := new(consumertest.TracesSink)
+	p, _ := startTestProcessor(t, sink, lb)
+	require.Equal(t, []string{"start"}, lb.recorded(),
+		"Start leads: a client that has not dialled can carry no subscription")
+
+	consumeAccepted(t, p, errorSpanBatch(pcommon.TraceID{0x77}, "kept"))
+	waitOneKeptSpan(t, sink)
+	require.NoError(t, p.shutdown(context.Background()))
+	assert.Equal(t, []string{"start", "publish", "cancel", "close"}, lb.recorded(),
+		"the connection outlives both the broadcast it carries and the subscription it feeds")
+}
+
+// A bus that cannot start fails the processor's start, rather than
+// leaving a live component whose every broadcast is refused. Nothing is
+// left running behind the refusal either — the goleak census in TestMain
+// is the other half of that claim.
+func TestProcessorStartFailsWhenBusStartFails(t *testing.T) {
+	lb := newLifecycleBus()
+	lb.startErr = errors.New("unusable credentials")
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.DiskBudget = testDiskBudget
+	cfg.Shards = 2
+	p := newTestProcessor(t, cfg, lb)
+	p.next = new(consumertest.TracesSink)
+
+	require.ErrorContains(t, p.start(context.Background(), componenttest.NewNopHost()),
+		"unusable credentials")
+	assert.Nil(t, p.set.Load(), "a failed start leaves no set behind for ingest to find")
+	require.NoError(t, p.shutdown(context.Background()), "shutdown after a failed start is a no-op")
+}
+
+// A bus that started, then a failure underneath it: the connection the
+// start opened is the start's to close. Nothing else ever would —
+// shutdown finds the nil set and returns — so it would outlive the
+// component that dialled it.
+func TestProcessorClosesBusWhenStartFailsUnderneathIt(t *testing.T) {
+	lb := newLifecycleBus()
+	cfg := createDefaultConfig().(*Config)
+	cfg.StorageDir = t.TempDir()
+	cfg.Shards = 2
+	// Under the shards' own active-segment floor, so New refuses: the
+	// failure has to land after the bus is up, not before it.
+	cfg.DiskBudget = 1 << 20
+	p := newTestProcessor(t, cfg, lb)
+	p.next = new(consumertest.TracesSink)
+
+	require.Error(t, p.start(context.Background(), componenttest.NewNopHost()))
+	assert.Equal(t, []string{"start", "close"}, lb.recorded(),
+		"the bus does not outlive the start that opened it")
+	require.NoError(t, p.shutdown(context.Background()))
+	assert.Equal(t, []string{"start", "close"}, lb.recorded(),
+		"and the shutdown that follows does not close it a second time")
+}
+
+// Close is bounded by the shutdown context. nats.go's drain parks up to
+// its own 30s timeout on a wedged delivery callback, which a collector
+// shutdown cannot afford to inherit for a connection that is about to
+// die with the process. The abandoned Close must not fail an otherwise
+// clean shutdown, and must not leave one owed: a shutdown that reported
+// success is never retried, so a second Close would never happen anyway.
+func TestShutdownAbandonsAWedgedBusClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	// Released before the goleak census, which the parked Close goroutine
+	// would otherwise fail — the bound abandons the call, it cannot unwedge
+	// the connection.
+	defer close(release)
+
+	lb := newLifecycleBus()
+	lb.closeGate = release
+	// The context expires inside Close rather than on a timer: what is
+	// under test is the bound itself, not how long the drains took.
+	lb.onClose = cancel
+
+	p, _ := startTestProcessor(t, new(consumertest.TracesSink), lb)
+	require.NoError(t, p.shutdown(ctx),
+		"a slow drain on a dying connection is not a shutdown failure")
+	assert.Nil(t, p.set.Load(),
+		"the shutdown completed, so the retry path is not armed")
+
+	require.NoError(t, p.shutdown(context.Background()))
+	assert.Equal(t, []string{"start", "cancel", "close"}, lb.recorded(),
+		"the abandoned Close is never retried into a second one")
 }
 
 // A refused fragment fails the whole batch: the upstream retry re-offers
