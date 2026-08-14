@@ -28,13 +28,20 @@ func coreConfig(url string) natsbus.Config {
 	}
 }
 
-func newCoreClient(t *testing.T, url string) *natsbus.Client {
+func newCoreClientOn(t *testing.T, url, subject string) *natsbus.Client {
 	t.Helper()
-	c, err := natsbus.New(coreConfig(url))
+	cfg := coreConfig(url)
+	cfg.Subject = subject
+	c, err := natsbus.New(cfg)
 	require.NoError(t, err)
 	require.NoError(t, c.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, c.Close()) })
 	return c
+}
+
+func newCoreClient(t *testing.T, url string) *natsbus.Client {
+	t.Helper()
+	return newCoreClientOn(t, url, "test.keeps")
 }
 
 func TestCoreContract(t *testing.T) {
