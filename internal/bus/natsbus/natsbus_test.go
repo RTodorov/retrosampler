@@ -275,24 +275,3 @@ func TestReconnectsCounted(t *testing.T) {
 		t.Fatal("no delivery after reconnect")
 	}
 }
-
-func TestDurableModeAwaitsItsTask(t *testing.T) {
-	ns := startServer(t, t.TempDir(), 0)
-	cfg := coreConfig(ns.ClientURL())
-	cfg.Mode = natsbus.ModeDurable
-	c, err := natsbus.New(cfg)
-	require.NoError(t, err)
-	require.NoError(t, c.Start(context.Background()))
-	t.Cleanup(func() { require.NoError(t, c.Close()) })
-
-	cancel, err := c.Subscribe(func([16]byte, byte) {})
-	require.ErrorContains(t, err, "durable subscribe lands with the durable-mode task")
-	assert.Nil(t, cancel)
-
-	// Durable Publish is already the acked JetStream path; with no stream
-	// bound to the subject yet, the ack never comes and the error is the
-	// flusher's to retry.
-	ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
-	defer done()
-	assert.Error(t, c.Publish(ctx, [16]byte{1}, bus.ReasonError))
-}

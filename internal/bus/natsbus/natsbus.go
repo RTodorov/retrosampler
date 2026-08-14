@@ -89,7 +89,7 @@ func New(cfg Config) (*Client, error) {
 // Start dials. RetryOnFailedConnect keeps an unreachable server from
 // failing collector startup: the connection object is live immediately
 // and redials in the background. Malformed options still fail here.
-func (c *Client) Start(_ context.Context) error {
+func (c *Client) Start(ctx context.Context) error {
 	opts := []nats.Option{
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
@@ -119,6 +119,13 @@ func (c *Client) Start(_ context.Context) error {
 			return fmt.Errorf("natsbus: jetstream: %w", err)
 		}
 		c.js = js
+		// Ensure here so a publisher-only collector still gets its stream,
+		// but best-effort and bounded: every subscribe ensures again, and a
+		// bus that is down at boot costs startup the timeout at worst
+		// rather than failing it (ADR-008).
+		ectx, done := context.WithTimeout(ctx, 5*time.Second)
+		defer done()
+		_ = c.ensureStream(ectx)
 	}
 	return nil
 }
@@ -158,11 +165,11 @@ func (c *Client) Publish(ctx context.Context, id [16]byte, reason byte) error {
 }
 
 // Subscribe registers fn. Core mode subscribes directly; durable mode
-// (the durable task) runs the ensure→ordered-consumer loop. cancel is
-// idempotent and stops new deliveries, but may return while a delivery
-// is still in flight — it does not wait for fn. The hardening tier pins
-// the property that matters, that cancel never deadlocks, including a
-// cancel called from inside fn (ADR-011 r5).
+// runs the ensure→ordered-consumer loop. cancel is idempotent and stops
+// new deliveries, but may return while a delivery is still in flight —
+// it does not wait for fn. The hardening tier pins the property that
+// matters, that cancel never deadlocks, including a cancel called from
+// inside fn (ADR-011 r5).
 func (c *Client) Subscribe(fn func(id [16]byte, reason byte)) (func(), error) {
 	if c.nc == nil {
 		return nil, errors.New("natsbus: Subscribe before Start")
@@ -214,8 +221,93 @@ func (c *Client) subscribeCore(fn func(id [16]byte, reason byte)) (func(), error
 	return cancel, nil
 }
 
-func (c *Client) subscribeDurable(_ func(id [16]byte, reason byte)) (func(), error) {
-	return nil, errors.New("natsbus: durable subscribe lands with the durable-mode task")
+// ensureStream idempotently creates-or-updates the stream with
+// MaxAge = W, which both bounds the replay horizon and repairs a live
+// horizon above W (ADR-011 r2). The stream belongs to the processor
+// fleet, so a foreign MaxAge above W is repaired, not tolerated.
+func (c *Client) ensureStream(ctx context.Context) error {
+	_, err := c.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     c.cfg.Stream,
+		Subjects: []string{c.cfg.Subject},
+		MaxAge:   c.cfg.Window,
+		Storage:  jetstream.FileStorage,
+	})
+	if err != nil {
+		return fmt.Errorf("natsbus: ensure stream %s: %w", c.cfg.Stream, err)
+	}
+	return nil
+}
+
+// subscribeDurable runs the ensure→ordered-consumer loop on its own
+// goroutine: with the bus unreachable or its JetStream not yet
+// answering, it retries every second until cancel, so a collector
+// deployed before its bus still subscribes eventually (ADR-008: outage
+// degrades, never fails startup). The
+// ordered consumer is deliver-all (a fresh subscribe replays the ≤W
+// backlog) and self-recreates across reconnects and server restarts;
+// the loop rebuilds it only once it has stopped for good.
+func (c *Client) subscribeDurable(fn func(id [16]byte, reason byte)) (func(), error) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	ctx, stop := context.WithCancel(context.Background())
+	go func() {
+		defer close(done)
+		for {
+			cc, err := c.consumeOnce(ctx, fn)
+			if err == nil {
+				select {
+				case <-quit:
+					cc.Stop()
+					return
+				case <-cc.Closed():
+					// Not a bounce — those the ordered consumer heals
+					// itself. This is a consume that ended for good.
+				}
+			}
+			if c.nc.IsClosed() {
+				// A closed connection never redials, so no rebuild can
+				// succeed: exit rather than retry until cancel.
+				return
+			}
+			select {
+			case <-quit:
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			stop()
+			close(quit)
+			if c.inFn.Load() == 0 {
+				<-done
+			}
+			// A cancel from inside fn cannot wait for fn's own return;
+			// with a delivery in flight the wait is skipped after
+			// signalling stop (pinned by the hardening tier).
+		})
+	}
+	return cancel, nil
+}
+
+// consumeOnce ensures the stream and starts one ordered consume.
+func (c *Client) consumeOnce(ctx context.Context, fn func(id [16]byte, reason byte)) (jetstream.ConsumeContext, error) {
+	ectx, ecancel := context.WithTimeout(ctx, 10*time.Second)
+	defer ecancel()
+	if err := c.ensureStream(ectx); err != nil {
+		return nil, err
+	}
+	cons, err := c.js.OrderedConsumer(ectx, c.cfg.Stream, jetstream.OrderedConsumerConfig{
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cons.Consume(func(m jetstream.Msg) {
+		c.deliver(fn, m.Data())
+	})
 }
 
 // Reconnects counts redials the connection completed after losing the
