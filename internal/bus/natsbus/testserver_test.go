@@ -12,9 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// startServer runs an embedded nats-server (ADR-011 r4, test-only) with
-// JetStream file storage in dir, on an ephemeral port unless port > 0.
-func startServer(t *testing.T, dir string, port int) *server.Server {
+// newRunningServer runs an embedded nats-server (ADR-011 r4, test-only)
+// with JetStream file storage in dir, on an ephemeral port unless
+// port > 0, and registers NO teardown: a harness that stops and restarts
+// one address owns that lifecycle itself, because a teardown registered
+// per restart would run in the wrong order against the clients built
+// before it.
+func newRunningServer(t *testing.T, dir string, port int) *server.Server {
 	t.Helper()
 	if port == 0 {
 		port = -1 // ephemeral
@@ -27,6 +31,14 @@ func startServer(t *testing.T, dir string, port int) *server.Server {
 	require.NoError(t, err)
 	ns.Start()
 	require.True(t, ns.ReadyForConnections(10*time.Second), "embedded nats-server never came up")
+	return ns
+}
+
+// startServer is newRunningServer with teardown on t, which is what every
+// test that never restarts its server wants.
+func startServer(t *testing.T, dir string, port int) *server.Server {
+	t.Helper()
+	ns := newRunningServer(t, dir, port)
 	t.Cleanup(func() { ns.Shutdown(); ns.WaitForShutdown() })
 	return ns
 }
