@@ -21,11 +21,13 @@ import (
 // The natsbus client reaches the processor as a bus.Bus, so everything
 // past that interface is optional and structural: a signature that
 // drifted out of one of these seams would not fail to compile, it would
-// stop being called. Start would never dial and Close would never
-// drain — two failures with no error anywhere.
+// stop being called. Start would never dial, Close would never drain,
+// and the bus.* instruments would go quiet — three failures with no
+// error anywhere.
 var (
 	_ busStarter = (*natsbus.Client)(nil)
 	_ busCloser  = (*natsbus.Client)(nil)
+	_ busMetrics = (*natsbus.Client)(nil)
 )
 
 // systemClock is the wall clock, injected into the processor from here — the

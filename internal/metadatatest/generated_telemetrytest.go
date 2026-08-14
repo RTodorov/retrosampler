@@ -67,6 +67,70 @@ func AssertEqualProcessorRetrosamplerBaggageMalformed(t *testing.T, tt *componen
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
 
+func AssertEqualProcessorRetrosamplerBusDropped(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.bus.dropped",
+		Description: "Keeps discarded client-side when this subscriber could not keep up - the documented operator trade of at_most_once core pub/sub (ADR-008 rule 6, ADR-011 rule 1). Always zero in durable mode, where a slow consumer resets and replays instead of dropping. [Development]",
+		Unit:        "{keeps}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.bus.dropped")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerBusErrors(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.bus.errors",
+		Description: "Bus failures that reach no caller - asynchronous errors such as an auth or permissions refusal, and failed stream ensures. Sustained non-zero means this instance's keeps are not crossing the bus, however healthy the connection looks. [Development]",
+		Unit:        "{errors}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.bus.errors")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerBusMalformed(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.bus.malformed",
+		Description: "Bus messages dropped for a wrong-length payload (the wire format is a 16-byte id plus an optional reason byte, ADR-011 rule 6). [Development]",
+		Unit:        "{messages}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.bus.malformed")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualProcessorRetrosamplerBusReconnects(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol.processor.retrosampler.bus.reconnects",
+		Description: "Bus client reconnects. Durable mode replays the gap; at_most_once mode lost it silently. [Development]",
+		Unit:        "{reconnects}",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol.processor.retrosampler.bus.reconnects")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
 func AssertEqualProcessorRetrosamplerCorruptFragments(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
 	want := metricdata.Metrics{
 		Name:        "otelcol.processor.retrosampler.corrupt.fragments",
