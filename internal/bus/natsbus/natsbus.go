@@ -61,6 +61,9 @@ type Client struct {
 
 	reconnects atomic.Uint64
 	malformed  atomic.Uint64
+	// errs counts the failures nobody is waiting on: the async errors
+	// nats.go reports out of band, and every failed stream ensure.
+	errs atomic.Uint64
 	// droppedGone carries the drop counts of cancelled subscriptions,
 	// which stop answering once unsubscribed.
 	droppedGone  atomic.Uint64
@@ -101,7 +104,14 @@ func (c *Client) Start(ctx context.Context) error {
 				// transition into the slow state, then stays quiet while
 				// it keeps discarding. Dropped counts the keeps.
 				c.slowEpisodes.Add(1)
+				return
 			}
+			// Everything else arrives with no caller to return it to — an
+			// auth or permissions refusal above all, which costs this
+			// instance every keep it broadcasts while the connection
+			// itself stays healthy. Unreported, that loss is total and
+			// invisible.
+			c.errs.Add(1)
 		}),
 	}
 	if c.cfg.CredsFile != "" {
@@ -225,6 +235,12 @@ func (c *Client) subscribeCore(fn func(id [16]byte, reason byte)) (func(), error
 // MaxAge = W, which both bounds the replay horizon and repairs a live
 // horizon above W (ADR-011 r2). The stream belongs to the processor
 // fleet, so a foreign MaxAge above W is repaired, not tolerated.
+//
+// Every failed attempt counts: one caller discards the error entirely
+// (Start's best-effort ensure) and the other retries it on a loop, so
+// counting here rather than at either call site is what keeps a
+// permanently unusable stream — durable mode delivering nothing at all
+// — from being a purely silent condition.
 func (c *Client) ensureStream(ctx context.Context) error {
 	_, err := c.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:     c.cfg.Stream,
@@ -233,6 +249,7 @@ func (c *Client) ensureStream(ctx context.Context) error {
 		Storage:  jetstream.FileStorage,
 	})
 	if err != nil {
+		c.errs.Add(1)
 		return fmt.Errorf("natsbus: ensure stream %s: %w", c.cfg.Stream, err)
 	}
 	return nil
@@ -316,6 +333,13 @@ func (c *Client) Reconnects() uint64 { return c.reconnects.Load() }
 
 // Malformed counts received payloads the wire codec refused.
 func (c *Client) Malformed() uint64 { return c.malformed.Load() }
+
+// Errors counts bus failures that reach no caller: the asynchronous
+// errors nats.go reports out of band (auth and permissions refusals
+// among them, each a total and otherwise invisible keep loss) and every
+// failed stream ensure. A sustained non-zero count means this instance's
+// keeps are not crossing the bus, however healthy the rest looks.
+func (c *Client) Errors() uint64 { return c.errs.Load() }
 
 // Dropped counts keeps discarded client-side, out of a subscription's
 // pending queue, when a subscriber cannot keep up with delivery — the

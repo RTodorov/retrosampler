@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,11 +116,55 @@ func TestDroppedCountsKeepsNotEpisodesAndSurvivesCancel(t *testing.T) {
 	dropped, episodes := c.Dropped(), c.SlowConsumerEpisodes()
 	require.Greater(t, dropped, episodes,
 		"Dropped must count discarded keeps, not slow-consumer episodes")
+	assert.Zero(t, c.Errors(),
+		"a slow consumer is the documented at_most_once trade, not a bus failure: "+
+			"counting it under Errors would raise a false alarm on every burst")
 
 	releaseFn()
 	cancel()
 	assert.GreaterOrEqual(t, c.Dropped(), dropped,
 		"a cancelled subscriber's drops must not vanish from the total")
+}
+
+// startRestrictedServer runs an embedded nats-server that authenticates
+// its one user and denies it the keep subject: the shape of a
+// misconfigured deployment, where the connection is healthy and every
+// publish is refused.
+func startRestrictedServer(t *testing.T) string {
+	t.Helper()
+	ns, err := server.NewServer(&server.Options{
+		Host: "127.0.0.1", Port: -1,
+		NoLog: true, NoSigs: true,
+		Users: []*server.User{{
+			Username: "u", Password: "p",
+			Permissions: &server.Permissions{
+				Publish: &server.SubjectPermission{Deny: []string{"test.keeps"}},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	ns.Start()
+	require.True(t, ns.ReadyForConnections(10*time.Second), "embedded nats-server never came up")
+	t.Cleanup(func() { ns.Shutdown(); ns.WaitForShutdown() })
+	return fmt.Sprintf("nats://u:p@127.0.0.1:%d", serverPort(ns))
+}
+
+// The async error handler is the only place an auth or permissions
+// failure ever surfaces: nats.go reports it out of band, so the publish
+// returns nil to the caller and this instance loses every keep it ever
+// broadcasts while looking entirely healthy. Counting it is what makes
+// the loss visible.
+func TestErrorsCountsAsyncPermissionFailures(t *testing.T) {
+	c := newCoreClient(t, startRestrictedServer(t))
+	require.Zero(t, c.Errors(), "a healthy connection reports no async failure")
+
+	require.NoError(t, c.Publish(context.Background(), tid(1), bus.ReasonError),
+		"core publish is fire-and-forget: the server's refusal never reaches the caller")
+	require.Eventually(t, func() bool { return c.Errors() >= 1 },
+		10*time.Second, 10*time.Millisecond,
+		"the permissions violation must be counted, not swallowed")
+	assert.Zero(t, c.SlowConsumerEpisodes(),
+		"a refused publish is not a slow consumer; the two failures must not share a counter")
 }
 
 func TestNewValidatesConfig(t *testing.T) {

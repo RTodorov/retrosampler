@@ -119,6 +119,34 @@ func TestDurableSubscribeRetriesUntilEnsureSucceeds(t *testing.T) {
 		30*time.Second, 100*time.Millisecond, "the retrying subscribe caught the usable bus")
 }
 
+// A failed ensure is durable mode's silent failure: with no stream the
+// ordered consumer has nothing to read from, so this instance delivers
+// no keeps whatsoever while every health signal it has stays green.
+// Start's best-effort attempt and the subscribe loop's retries must all
+// count — a single latched flag would go stale the moment the operator
+// looked at it.
+func TestErrorsCountsFailedEnsureAttempts(t *testing.T) {
+	port := freePort(t)
+	startPlainServer(t, port) // reachable, with no JetStream to answer
+	c, err := natsbus.New(natsbus.Config{
+		URL: fmt.Sprintf("nats://127.0.0.1:%d", port), Mode: natsbus.ModeDurable,
+		Subject: "test.keeps", Stream: "test-keeps", Window: time.Minute,
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.Start(context.Background()),
+		"a bus that cannot ensure must still not fail startup (ADR-008)")
+	defer func() { require.NoError(t, c.Close()) }()
+	require.Equal(t, uint64(1), c.Errors(),
+		"Start's best-effort ensure failed, and best-effort is not the same as unreported")
+
+	cancel, err := c.Subscribe(func([16]byte, byte) {})
+	require.NoError(t, err)
+	defer cancel()
+	require.Eventually(t, func() bool { return c.Errors() >= 3 },
+		30*time.Second, 50*time.Millisecond,
+		"every retry of the subscribe loop counts its own failed ensure")
+}
+
 // A pre-existing stream with MaxAge > W violates the <=W replay-horizon
 // contract; ensure must repair it to W (the stream belongs to the
 // processor fleet) — and the repaired MaxAge must be observable.
