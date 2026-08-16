@@ -75,10 +75,7 @@ func (d *distinctKeeps) count() int {
 	return len(d.ids)
 }
 
-// batchResult carries a Publish return off the goroutine it is bounded
-// on. Publish is timed from the outside — the clock ADR-002 r4 reserves
-// for the injected factory is not available to a test — so the bound is
-// a race between the call returning and a timer.
+// batchResult carries a Publish return off the goroutine it was run on.
 type batchResult struct {
 	failed []bus.Keep
 	err    error
@@ -86,7 +83,11 @@ type batchResult struct {
 
 // publishBounded runs pub on its own goroutine and fails the test if it
 // has not returned within the bound. The publish is passed as a closure
-// so ctx stays the first argument of the call it belongs to.
+// so ctx stays the first argument of the call it belongs to. The
+// timeout path marks the failure and then still waits for pub: a
+// t.Fatalf here would leave the publish running against a client the
+// registered cleanup is about to close, turning a timing failure into a
+// race report or a nil dereference instead of the message below.
 func publishBounded(t *testing.T, within time.Duration, why string, pub func() ([]bus.Keep, error)) batchResult {
 	t.Helper()
 	done := make(chan batchResult, 1)
@@ -98,8 +99,8 @@ func publishBounded(t *testing.T, within time.Duration, why string, pub func() (
 	case r := <-done:
 		return r
 	case <-time.After(within):
-		t.Fatalf("the batch did not return within %v: %s", within, why)
-		return batchResult{}
+		t.Errorf("the batch did not return within %v: %s", within, why)
+		return <-done
 	}
 }
 
@@ -107,18 +108,7 @@ func publishBounded(t *testing.T, within time.Duration, why string, pub func() (
 // keeps in, none failed, N distinct keeps durable. Publish returns only
 // once the acks are joined, so a subscriber attached afterwards replays
 // exactly what the batch made durable — the count is the proof the
-// pipelining is not dropping acks on the floor. The subscribe comes
-// after the publish so the consumer is not competing with the window it
-// is being used to measure.
-//
-// The bound is what separates pipelined from sequential: a sequential
-// durable publish costs one ack round trip per keep, the async window
-// one per chunk. batchN is far above a real flush batch on purpose —
-// the round trip against an in-process server is small enough that a
-// batch the size of the flusher's own cannot separate the two under
-// -race, where the detector's overhead swamps the saving. At batchN the
-// measured split is decisive: 150-300ms sequential against 30-50ms
-// pipelined, so the bound is a regression guard rather than a stopwatch.
+// pipelining is not dropping acks on the floor.
 func TestDurableBatchPublishLandsEveryKeep(t *testing.T) {
 	// Sixteen chunks of the async window, so the per-chunk join is
 	// exercised repeatedly rather than once.
@@ -126,11 +116,9 @@ func TestDurableBatchPublishLandsEveryKeep(t *testing.T) {
 	ns := startServer(t, t.TempDir(), 0)
 	c := newDurableClient(t, ns.ClientURL())
 
-	r := publishBounded(t, 120*time.Millisecond,
-		"one batch must cost an ack round trip per chunk, not per keep",
-		func() ([]bus.Keep, error) { return c.Publish(context.Background(), batchOf(batchN)) })
-	require.NoError(t, r.err)
-	require.Empty(t, r.failed, "a healthy durable bus fails nothing")
+	failed, err := c.Publish(context.Background(), batchOf(batchN))
+	require.NoError(t, err)
+	require.Empty(t, failed, "a healthy durable bus fails nothing")
 
 	var d distinctKeeps
 	cancel, err := c.Subscribe(d.add)
@@ -139,6 +127,54 @@ func TestDurableBatchPublishLandsEveryKeep(t *testing.T) {
 	require.Eventually(t, func() bool { return d.count() >= batchN },
 		10*time.Second, 10*time.Millisecond, "every keep in the batch is durable")
 	assert.Equal(t, batchN, d.count(), "the batch lands its keeps, not one keep repeatedly")
+}
+
+// The pipelining claim, measured against a yardstick that scales with
+// the machine instead of a wall-clock constant. A batch costs one ack
+// round trip per chunk; a sequential publisher costs one per keep. So a
+// batchN batch is sixteen round trips wide and must finish ahead of seqN
+// single-keep publishes running beside it — the margin is architectural
+// (16 against seqN), which is what makes it survive a slow CI box, where
+// a hard millisecond bound calibrated on a dev machine would flake. The
+// pre-window implementation spent batchN round trips on the same batch
+// and loses this race decisively.
+//
+// The yardstick publishes on its own subject and stream so it cannot
+// contribute keeps to anything the batch client is asserted on.
+func TestDurableBatchOutrunsSequentialPublisher(t *testing.T) {
+	const batchN = 1000
+	const seqN = 250
+	ns := startServer(t, t.TempDir(), 0)
+	batchC := newDurableClient(t, ns.ClientURL())
+	seqC := newDurableClientOn(t, ns.ClientURL(), "test.yardstick", "test-yardstick")
+
+	yard := batchOf(seqN)
+	seqDone := make(chan struct{})
+	go func() {
+		defer close(seqDone)
+		for i := range yard {
+			if _, err := seqC.Publish(context.Background(), yard[i:i+1]); err != nil {
+				return
+			}
+		}
+	}()
+	batchDone := make(chan batchResult, 1)
+	go func() {
+		failed, err := batchC.Publish(context.Background(), batchOf(batchN))
+		batchDone <- batchResult{failed, err}
+	}()
+
+	select {
+	case r := <-batchDone:
+		<-seqDone // no publish still in flight when the clients close
+		require.NoError(t, r.err)
+		require.Empty(t, r.failed, "a healthy durable bus fails nothing")
+	case <-seqDone:
+		r := <-batchDone
+		require.NoError(t, r.err)
+		t.Fatalf("a %d-keep batch lost to %d sequential publishes: "+
+			"the window is paying an ack round trip per keep, not per chunk", batchN, seqN)
+	}
 }
 
 // Every keep of a batch wider than one chunk comes back failed when the
@@ -167,10 +203,13 @@ func TestDurableBatchFailsEveryKeepAcrossChunksWhenCtxDies(t *testing.T) {
 	// Establish the precondition before asserting on it: until the client
 	// has noticed the server is gone, a publish can still resolve its acks
 	// against the connection it thinks it has, and the batch under test
-	// would never reach the ctx deadline it exists to exercise.
-	pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer pcancel()
+	// would never reach the ctx deadline it exists to exercise. Each probe
+	// gets its own budget — a ctx built once outside the poll would expire
+	// on its own and satisfy the gate without the bus having anything to
+	// do with it.
 	require.Eventually(t, func() bool {
+		pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer pcancel()
 		failed, err := c.Publish(pctx, batchOf(1))
 		return err != nil && len(failed) == 1
 	}, 30*time.Second, 100*time.Millisecond, "the client must notice the bus is unreachable")
@@ -187,6 +226,70 @@ func TestDurableBatchFailsEveryKeepAcrossChunksWhenCtxDies(t *testing.T) {
 		d.add(k.ID, k.Reason)
 	}
 	assert.Equal(t, batchN, d.count(), "the failed set names every keep, not one keep batchN times")
+}
+
+// The exhaustive tail again, this time pinned deterministically and
+// against a healthy bus. A ctx that is already dead breaks the publish
+// loop before the first keep, so nothing is attempted and no future can
+// resolve: the tail append is the only path by which any keep can be
+// reported, and it must report all of them. The unreachable-bus test
+// above asserts the same outcome but reaches it through whichever arm
+// wins a race with nats.go's disconnect handling, so it cannot pin this
+// branch on its own.
+func TestDurableBatchFailsEveryKeepWhenCtxIsAlreadyDead(t *testing.T) {
+	const batchN = 100
+	ns := startServer(t, t.TempDir(), 0)
+	c := newDurableClient(t, ns.ClientURL())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	failed, err := c.Publish(ctx, batchOf(batchN))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Len(t, failed, batchN, "a dead ctx fails every keep it was handed, attempted or not")
+	var d distinctKeeps
+	for _, k := range failed {
+		d.add(k.ID, k.Reason)
+	}
+	assert.Equal(t, batchN, d.count(), "the failed set names every keep")
+}
+
+// The bus.Bus invariant "err nil iff failed empty", swept across the
+// deadline region where a durable batch finishes. The interesting
+// deadline is the one expiring just as the last ack lands: the batch is
+// then fully durable, failed must be empty, and an error beside an empty
+// failed set is a lie the flusher acts on by requeueing keeps that are
+// already on the bus. That crossing point moves with the machine, so the
+// sweep walks a range wide enough to contain it instead of targeting a
+// constant — and on a box slow enough that the range falls short, every
+// sample simply lands on the failing side and the run still holds.
+//
+// The assertion cannot fail on correct code, since the invariant holds
+// at every deadline. So this costs nothing when the code is right and
+// catches a real violation on most runs when it is not.
+func TestDurablePublishHoldsErrorInvariantAcrossDeadlines(t *testing.T) {
+	ns := startServer(t, t.TempDir(), 0)
+	c := newDurableClient(t, ns.ClientURL())
+	// Warm the async reply plumbing so the first sample is not charged
+	// for creating it.
+	_, err := c.Publish(context.Background(), batchOf(1))
+	require.NoError(t, err)
+
+	for step := 1; step <= 400; step++ {
+		deadline := time.Duration(step) * 50 * time.Microsecond
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
+		// One full window per sample: the wider the chunk, the wider the
+		// join it has to cross to reach the deadline.
+		failed, perr := c.Publish(ctx, batchOf(64))
+		cancel()
+		if len(failed) == 0 {
+			require.NoErrorf(t, perr,
+				"deadline %v: a batch that failed nothing must report no error", deadline)
+			continue
+		}
+		require.Errorf(t, perr,
+			"deadline %v: %d keeps came back failed with no error to explain them",
+			deadline, len(failed))
+	}
 }
 
 func TestDurableContract(t *testing.T) {
