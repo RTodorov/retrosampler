@@ -67,6 +67,10 @@ type Options struct {
 	// dequeueHook, when set, runs in each worker at the top of its
 	// loop. Test-only: lets tests wedge a worker deterministically.
 	dequeueHook func()
+	// collectHook, when set, runs before every whole-trace buffer
+	// Collect a worker performs. Test-only: counts the disk work the
+	// drain gate exists to bound.
+	collectHook func()
 }
 
 // eventKind tags a fragBuf's role in the shard queue: one bounded typed
