@@ -233,6 +233,12 @@ func TestParkedIntentsDrainOldestFirst(t *testing.T) {
 		require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
 		require.True(t, s.Retry(id, 1, NeedFlush, 0, nil))
 	}
+	// Retry only enqueues, so the parks are still in flight here. The
+	// gauge reaching 3 is what says all three are in the queue, in the
+	// order the one work channel handed them over.
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 3 },
+		5*time.Second, time.Millisecond, "all three intents are parked before the slot frees")
+
 	<-flush // free the slot; ticks may now send one job at a time
 	for _, want := range ids {
 		j := recvJob(t, flush)
@@ -488,8 +494,12 @@ func TestAbandonedIntentDoesNotPoisonTheNextPublish(t *testing.T) {
 // The deadline sweep is not starved by a blocked drain: with a nil
 // flush channel (permanently "full" — nothing can ever send), a parked
 // publish intent past its deadline is still abandoned on the tick.
-// This kills the sweep-folded-into-drain mutant, where abandonment
-// would wait for the intent's drain turn that never comes.
+//
+// This kills nothing today, and says so: an ungated drain reaches every
+// intent every tick, so a sweep folded back into it abandons on the same
+// tick and passes this too (measured, with the fold applied). The pin is
+// here for the gated drain, which stops at its head — there the split is
+// the only thing keeping abandonment on a schedule of its own.
 func TestSweepAbandonsWhileDrainIsBlocked(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	opts := testOptions(t.TempDir(), clk)
