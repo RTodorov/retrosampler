@@ -292,6 +292,25 @@ func TestPublishBeforeStartFails(t *testing.T) {
 	}
 }
 
+func TestPublishEmptyBatchNeverFails(t *testing.T) {
+	// An empty failed set forbids a non-nil error (bus.Bus contract), and
+	// an empty batch can never fail: it owes nothing. The unstarted client
+	// asks the question deterministically — it is the one path that reports
+	// failure without ever reaching the wire, so it is where a batch of
+	// nothing would otherwise be handed back as a batch that failed.
+	for _, mode := range []string{natsbus.ModeAtMostOnce, natsbus.ModeDurable} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := coreConfig("nats://127.0.0.1:4222")
+			cfg.Mode = mode
+			c, err := natsbus.New(cfg)
+			require.NoError(t, err)
+			failed, err := c.Publish(context.Background(), []bus.Keep{})
+			require.NoError(t, err)
+			assert.Empty(t, failed)
+		})
+	}
+}
+
 func TestCloseBeforeStartIsNil(t *testing.T) {
 	c, err := natsbus.New(coreConfig("nats://127.0.0.1:4222"))
 	require.NoError(t, err)
