@@ -67,9 +67,9 @@ type pendReq struct {
 	reason byte
 	need   Need
 	// queued says the id currently sits in pendq, so a merge into an
-	// existing entry never double-enqueues it. Packed with the two bytes
-	// above rather than after deadline: in the padding either way, so the
-	// entry stays 16 bytes and the FIFO's membership bit costs nothing.
+	// existing entry never double-enqueues it. Declared beside reason and
+	// need to land in the padding those two already carry, keeping the
+	// entry at 16 bytes; after deadline it would pad it out to 24.
 	queued   bool
 	deadline int64
 }
