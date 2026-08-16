@@ -67,52 +67,148 @@ func newFlusher(jobs <-chan *shards.FlushJob, set *shards.Set,
 // start launches the flusher goroutine (one; part of the static census).
 func (fl *flusher) start() { go fl.run() }
 
+// chanCtx adapts the flusher's stop channel into a context for the
+// publish ack join: Done is the channel itself, so a batch mid-join
+// aborts the moment stop is signalled. Deadline-free and value-free by
+// construction.
+type chanCtx <-chan struct{}
+
+func (c chanCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c chanCtx) Done() <-chan struct{}       { return c }
+func (c chanCtx) Value(any) any               { return nil }
+
+func (c chanCtx) Err() error {
+	select {
+	case <-c:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// drainPublishTimeout bounds each best-effort batch published after
+// stop: the drain still attempts real publishes (a healthy bus acks in
+// microseconds), but a wedged one costs shutdown this much per batch,
+// not forever.
+const drainPublishTimeout = 2 * time.Second
+
 // run exits only via stopc. The jobs channel is never closed — by
 // contract the shard workers outlive nothing here, and a closed channel
 // would spin this loop on zero values — so the drain below reads it only
 // until it is momentarily empty.
 func (fl *flusher) run() {
 	defer close(fl.done)
+	var batch []*shards.FlushJob
 	for {
 		select {
 		case <-fl.stopc:
 			// Best-effort drain: flush what is already queued, then go.
 			for {
-				select {
-				case j := <-fl.jobs:
-					fl.process(j)
-				default:
+				if batch = fl.gather(batch[:0]); len(batch) == 0 {
 					return
 				}
+				fl.drainBatch(batch)
 			}
 		case j := <-fl.jobs:
-			fl.process(j)
+			batch = fl.gather(append(batch[:0], j))
+			// The publish context follows the stop signal's state, not the
+			// branch that got here. Once stopc is closed both cases above
+			// are ready and select picks uniformly, so the shutdown backlog
+			// lands here about half the time — and chanCtx would cancel its
+			// publish on sight, losing a whole drain's broadcasts to a coin
+			// flip.
+			if ctx := chanCtx(fl.stopc); ctx.Err() == nil {
+				fl.processBatch(ctx, batch)
+				continue
+			}
+			fl.drainBatch(batch)
 		}
 	}
 }
 
-// process runs one job's remaining need-bits: publish first (other
-// clusters' retention windows are burning), then decode+consume. Any
-// retryable failure re-parks the un-done bits on the owning shard;
-// permanent failures and undecodable fragments are counted and dropped.
-func (fl *flusher) process(j *shards.FlushJob) {
-	ctx := context.Background()
-	need := j.Need
-	if need&shards.NeedPublish != 0 {
-		if failed, _ := fl.b.Publish(ctx, []bus.Keep{{ID: j.ID, Reason: j.Reason}}); len(failed) > 0 {
-			fl.publishErrors.Add(1)
-			fl.retry(j, need)
-			return
+// drainBatch processes one post-stop batch under a bounded standalone
+// context. The stop signal is already spent by then, so keying the
+// publish to it would refuse every keep on sight; best-effort means
+// actually attempting the broadcast, and drainPublishTimeout is what
+// keeps a wedged bus from owning shutdown.
+func (fl *flusher) drainBatch(batch []*shards.FlushJob) {
+	ctx, cancel := context.WithTimeout(context.Background(), drainPublishTimeout)
+	defer cancel()
+	fl.processBatch(ctx, batch)
+}
+
+// gather appends every job already queued, without blocking: the batch
+// is the backlog that accumulated while the flusher was busy — never a
+// wait. Its size is bounded in practice by the channel depth plus the
+// handful of sends racing this loop.
+func (fl *flusher) gather(batch []*shards.FlushJob) []*shards.FlushJob {
+	for {
+		select {
+		case j := <-fl.jobs:
+			batch = append(batch, j)
+		default:
+			return batch
 		}
-		fl.publishedKeeps.Add(1)
-		// The publish bit is deliberately not cleared from need here: it
-		// is never read again. What remains owed is exactly NeedFlush,
-		// which the consume path below re-parks by name so a retried
-		// consume can never rebroadcast the keep.
 	}
-	if need&shards.NeedFlush == 0 || len(j.Frags) == 0 {
+}
+
+// processBatch publishes the batch's owed keeps in one bus call (other
+// clusters' retention windows are burning — every ack joins before any
+// consume), re-parks what failed, then decodes and consumes the rest.
+//
+// Publish-owing keeps dedupe by id: two jobs for one trace can coexist
+// in a batch only in contrived cases, but the dedupe keeps the failed-set
+// lookup unambiguous either way.
+func (fl *flusher) processBatch(ctx context.Context, batch []*shards.FlushJob) {
+	var keeps []bus.Keep
+	seen := make(map[[16]byte]struct{}, len(batch))
+	for _, j := range batch {
+		if j.Need&shards.NeedPublish == 0 {
+			continue
+		}
+		if _, dup := seen[j.ID]; dup {
+			continue
+		}
+		seen[j.ID] = struct{}{}
+		keeps = append(keeps, bus.Keep{ID: j.ID, Reason: j.Reason})
+	}
+	failedSet := map[[16]byte]struct{}{}
+	if len(keeps) > 0 {
+		failed, _ := fl.b.Publish(ctx, keeps)
+		for _, k := range failed {
+			failedSet[k.ID] = struct{}{}
+		}
+		fl.publishErrors.Add(uint64(len(failed)))
+		// Publish reports failed as a subset of keeps, so the difference
+		// cannot go negative; the guard also keeps the conversion sign-safe.
+		if acked := len(keeps) - len(failed); acked > 0 {
+			fl.publishedKeeps.Add(uint64(acked))
+		}
+	}
+	for _, j := range batch {
+		if j.Need&shards.NeedPublish != 0 {
+			if _, bad := failedSet[j.ID]; bad {
+				fl.retry(j, j.Need)
+				continue
+			}
+			// The publish bit is deliberately not cleared from need here:
+			// it is never read again. What remains owed is exactly
+			// NeedFlush, which consume re-parks by name so a retried
+			// consume can never rebroadcast the keep.
+		}
+		fl.consume(j)
+	}
+}
+
+// consume decodes one job's fragments and hands the merged batch to the
+// next consumer. A retryable refusal re-parks the flush bit on the owning
+// shard; permanent failures and undecodable fragments are counted and
+// dropped.
+func (fl *flusher) consume(j *shards.FlushJob) {
+	if j.Need&shards.NeedFlush == 0 || len(j.Frags) == 0 {
 		return
 	}
+	ctx := context.Background()
 	td := ptrace.NewTraces()
 	for _, frag := range j.Frags {
 		ft, err := fragmenter.Decode(frag)
