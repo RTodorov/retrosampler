@@ -23,5 +23,5 @@ func TestRunContractBuildsOneBusPerSubtest(t *testing.T) {
 		built[b] = struct{}{}
 		return b
 	})
-	assert.Len(t, built, 4, "one fresh bus per contract subtest")
+	assert.Len(t, built, 5, "one fresh bus per contract subtest")
 }

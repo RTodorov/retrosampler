@@ -165,8 +165,10 @@ func TestErrorsCountsAsyncPermissionFailures(t *testing.T) {
 	c := newCoreClient(t, startRestrictedServer(t))
 	require.Zero(t, c.Errors(), "a healthy connection reports no async failure")
 
-	require.NoError(t, c.Publish(context.Background(), tid(1), bus.ReasonError),
+	failed, err := c.Publish(context.Background(), []bus.Keep{{ID: tid(1), Reason: bus.ReasonError}})
+	require.NoError(t, err,
 		"core publish is fire-and-forget: the server's refusal never reaches the caller")
+	require.Empty(t, failed)
 	require.Eventually(t, func() bool { return c.Errors() >= 1 },
 		10*time.Second, 10*time.Millisecond,
 		"the permissions violation must be counted, not swallowed")
@@ -224,7 +226,9 @@ func TestStartAgainstUnreachableServerSucceeds(t *testing.T) {
 	cancel()
 	// Core mode is at-most-once: a publish while disconnected lands in the
 	// reconnect buffer rather than erroring.
-	assert.NoError(t, c.Publish(context.Background(), [16]byte{1}, bus.ReasonError))
+	failed, err := c.Publish(context.Background(), []bus.Keep{{ID: [16]byte{1}, Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	assert.Empty(t, failed)
 	assert.NoError(t, c.Close(), "closing a never-connected client is not a failure")
 }
 
@@ -280,9 +284,10 @@ func TestPublishBeforeStartFails(t *testing.T) {
 			cfg.Mode = mode
 			c, err := natsbus.New(cfg)
 			require.NoError(t, err)
-			require.ErrorContains(t,
-				c.Publish(context.Background(), [16]byte{1}, bus.ReasonError),
-				"Publish before Start")
+			failed, err := c.Publish(context.Background(), []bus.Keep{{ID: [16]byte{1}, Reason: bus.ReasonError}})
+			require.ErrorContains(t, err, "Publish before Start")
+			assert.Len(t, failed, 1,
+				"a publish that never left the client fails every keep it was handed")
 		})
 	}
 }
@@ -320,7 +325,9 @@ func TestReconnectsCounted(t *testing.T) {
 	cancel, err := c.Subscribe(func([16]byte, byte) { got <- struct{}{} })
 	require.NoError(t, err)
 	defer cancel()
-	require.NoError(t, c.Publish(context.Background(), [16]byte{7}, bus.ReasonError))
+	failed, err := c.Publish(context.Background(), []bus.Keep{{ID: [16]byte{7}, Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	select {
 	case <-got:
 	case <-time.After(5 * time.Second):

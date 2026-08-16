@@ -61,7 +61,9 @@ func TestDurableFreshSubscribeReplaysBacklog(t *testing.T) {
 	ns := startServer(t, t.TempDir(), 0)
 	pub := newDurableClient(t, ns.ClientURL())
 	for i := byte(1); i <= 5; i++ {
-		require.NoError(t, pub.Publish(context.Background(), tid(i), bus.ReasonError))
+		failed, err := pub.Publish(context.Background(), []bus.Keep{{ID: tid(i), Reason: bus.ReasonError}})
+		require.NoError(t, err)
+		require.Empty(t, failed)
 	}
 	sub := newDurableClient(t, ns.ClientURL()) // subscribes AFTER the publishes
 	var got atomic.Int64
@@ -113,7 +115,8 @@ func TestDurableSubscribeRetriesUntilEnsureSucceeds(t *testing.T) {
 	pub := newDurableClient(t, url)
 	defer func() { require.NoError(t, pub.Close()) }()
 	require.Eventually(t, func() bool {
-		return pub.Publish(context.Background(), tid(9), bus.ReasonError) == nil
+		failed, err := pub.Publish(context.Background(), []bus.Keep{{ID: tid(9), Reason: bus.ReasonError}})
+		return err == nil && len(failed) == 0
 	}, 30*time.Second, 100*time.Millisecond, "publish reaches the JetStream server")
 	require.Eventually(t, func() bool { return got.Load() >= 1 },
 		30*time.Second, 100*time.Millisecond, "the retrying subscribe caught the usable bus")
@@ -187,7 +190,9 @@ func TestDurableCloseWithoutCancelStopsTheLoop(t *testing.T) {
 		}
 	})
 	require.NoError(t, err)
-	require.NoError(t, c.Publish(context.Background(), tid(1), bus.ReasonError))
+	failed, err := c.Publish(context.Background(), []bus.Keep{{ID: tid(1), Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	select {
 	case <-got:
 	case <-time.After(10 * time.Second):
@@ -219,7 +224,9 @@ func TestDurableReplaySurvivesServerRestart(t *testing.T) {
 	defer cancel()
 	pub := newDurableClient(t, url)
 	defer func() { require.NoError(t, pub.Close()) }()
-	require.NoError(t, pub.Publish(context.Background(), tid(1), bus.ReasonError))
+	failed, err := pub.Publish(context.Background(), []bus.Keep{{ID: tid(1), Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	require.Eventually(t, func() bool { return got.Load() == 1 }, 10*time.Second, 10*time.Millisecond)
 
 	ns.Shutdown()
@@ -227,7 +234,8 @@ func TestDurableReplaySurvivesServerRestart(t *testing.T) {
 	startServer(t, dir, port) // same port, same store
 
 	require.Eventually(t, func() bool {
-		return pub.Publish(context.Background(), tid(2), bus.ReasonError) == nil
+		failed, err := pub.Publish(context.Background(), []bus.Keep{{ID: tid(2), Reason: bus.ReasonError}})
+		return err == nil && len(failed) == 0
 	}, 30*time.Second, 100*time.Millisecond, "publish recovers after server restart")
 	require.Eventually(t, func() bool { return got.Load() == 2 },
 		30*time.Second, 100*time.Millisecond, "the ordered consumer resumed across the restart")

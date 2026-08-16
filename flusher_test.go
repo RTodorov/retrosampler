@@ -157,14 +157,16 @@ type busSpy struct {
 
 func newBusSpy() *busSpy { return &busSpy{Bus: bus.NewLoopback()} }
 
-func (b *busSpy) Publish(ctx context.Context, id [16]byte, reason byte) error {
+func (b *busSpy) Publish(ctx context.Context, keeps []bus.Keep) ([]bus.Keep, error) {
 	if b.failing.Load() {
-		return errors.New("bus unavailable")
+		return append([]bus.Keep(nil), keeps...), errors.New("bus unavailable")
 	}
 	b.mu.Lock()
-	b.verdicts = append(b.verdicts, publishedKeep{id: id, reason: reason})
+	for _, k := range keeps {
+		b.verdicts = append(b.verdicts, publishedKeep{id: k.ID, reason: k.Reason})
+	}
 	b.mu.Unlock()
-	return b.Bus.Publish(ctx, id, reason)
+	return b.Bus.Publish(ctx, keeps)
 }
 
 func (b *busSpy) published() int {

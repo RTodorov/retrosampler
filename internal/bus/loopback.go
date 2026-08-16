@@ -47,22 +47,25 @@ func NewLoopback() *Loopback {
 	return &Loopback{subs: make(map[int]*subscriber)}
 }
 
-// Publish delivers to every current subscriber, blocking on a full
-// buffer until the subscriber drains or cancels.
-func (l *Loopback) Publish(_ context.Context, id [16]byte, reason byte) error {
+// Publish delivers every keep to every current subscriber, blocking on
+// a full buffer until the subscriber drains or cancels. In-process
+// delivery cannot fail: failed is always nil.
+func (l *Loopback) Publish(_ context.Context, keeps []Keep) ([]Keep, error) {
 	l.mu.Lock()
 	targets := make([]*subscriber, 0, len(l.subs))
 	for _, s := range l.subs {
 		targets = append(targets, s)
 	}
 	l.mu.Unlock()
-	for _, s := range targets {
-		select {
-		case s.ch <- keepMsg{id: id, reason: reason}:
-		case <-s.quit:
+	for _, k := range keeps {
+		for _, s := range targets {
+			select {
+			case s.ch <- keepMsg{id: k.ID, reason: k.Reason}:
+			case <-s.quit:
+			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // Subscribe registers fn and starts its delivery goroutine. Loopback's
