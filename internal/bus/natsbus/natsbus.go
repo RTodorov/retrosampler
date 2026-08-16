@@ -29,6 +29,17 @@ const (
 	ModeAtMostOnce = "at_most_once"
 )
 
+// asyncMaxPending is both the size of the durable publish window and the
+// size of the chunk a Publish batch is split into — one constant for
+// both on purpose. The window is drained (acks joined) between chunks,
+// so a chunk that starts from an empty window can fill it exactly and
+// never stall: PublishAsync takes no ctx and parks up to 200ms waiting
+// for room once the window is full. 64 matches the flusher's
+// channel-bounded batch by value; the root package cannot be imported
+// from internal/, so the two are owned independently and this one is
+// load-bearing for the no-stall claim.
+const asyncMaxPending = 64
+
 // Config is natsbus's own plain config: the root package maps its
 // NATSConfig (pre-defaulted) onto this, so internal/ never imports root.
 type Config struct {
@@ -123,7 +134,7 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	c.nc = nc
 	if c.cfg.Mode == ModeDurable {
-		js, err := jetstream.New(nc)
+		js, err := jetstream.New(nc, jetstream.WithPublishAsyncMaxPending(asyncMaxPending))
 		if err != nil {
 			nc.Close()
 			return fmt.Errorf("natsbus: jetstream: %w", err)
@@ -160,9 +171,9 @@ func (c *Client) Close() error {
 
 // Publish broadcasts a batch of keeps. Core mode is fire-and-forget
 // into the connection buffer per keep (at-most-once by contract);
-// durable mode is acked JetStream publishing honoring ctx. Whatever
-// fails lands in failed for the flusher's retry machinery, bounded by
-// the ADR-011 r3 intent deadline.
+// durable mode pipelines the batch through the async ack window,
+// honoring ctx. Whatever fails lands in failed for the flusher's retry
+// machinery, bounded by the ADR-011 r3 intent deadline.
 func (c *Client) Publish(ctx context.Context, keeps []bus.Keep) (failed []bus.Keep, err error) {
 	if len(keeps) == 0 {
 		// An empty batch is vacuously durable, Start or no Start: there is
@@ -173,23 +184,81 @@ func (c *Client) Publish(ctx context.Context, keeps []bus.Keep) (failed []bus.Ke
 	if c.nc == nil {
 		return append(failed, keeps...), errors.New("natsbus: Publish before Start")
 	}
-	for i, k := range keeps {
-		var perr error
-		if c.cfg.Mode == ModeAtMostOnce {
-			perr = c.nc.Publish(c.cfg.Subject, encodeKeep(k.ID, k.Reason))
-		} else {
-			_, perr = c.js.Publish(ctx, c.cfg.Subject, encodeKeep(k.ID, k.Reason))
-		}
-		if perr != nil {
+	if c.cfg.Mode == ModeDurable {
+		return c.publishDurable(ctx, keeps)
+	}
+	// Core mode never leaves the process: each publish is a buffer write,
+	// so there is no round trip to amortize and no deadline to honor.
+	for _, k := range keeps {
+		if perr := c.nc.Publish(c.cfg.Subject, encodeKeep(k.ID, k.Reason)); perr != nil {
 			failed = append(failed, k)
 			err = perr
+		}
+	}
+	return failed, err
+}
+
+// publishDurable pipelines one batch through the async window: publish a
+// chunk, join its acks once, collect the per-keep failures. The whole
+// point is that the ack round trip amortizes across the chunk instead of
+// multiplying by it.
+//
+// An ack that never resolves before ctx dies reports its keep failed; if
+// the publish actually landed server-side, the retried keep is a
+// duplicate the decided set absorbs (ADR-008 r5) — the same ambiguity a
+// failed synchronous publish always had.
+func (c *Client) publishDurable(ctx context.Context, keeps []bus.Keep) (failed []bus.Keep, err error) {
+	for start := 0; start < len(keeps); start += asyncMaxPending {
+		chunk := keeps[start:min(start+asyncMaxPending, len(keeps))]
+		futs := make([]jetstream.PubAckFuture, len(chunk))
+		sent := 0
+		for i, k := range chunk {
 			if ctx.Err() != nil {
-				// A dead ctx fails every keep still unattempted; keep
-				// the contract's failed ⊆ keeps exhaustive rather than
-				// burning a timeout per remaining keep.
-				failed = append(failed, keeps[i+1:]...)
-				return failed, err
+				// PublishAsync takes no ctx and stalls on a full window, so
+				// the deadline is checked here rather than waited out.
+				break
 			}
+			sent = i + 1
+			f, perr := c.js.PublishAsync(c.cfg.Subject, encodeKeep(k.ID, k.Reason))
+			if perr != nil {
+				failed = append(failed, k)
+				err = perr
+				continue
+			}
+			futs[i] = f
+		}
+		// The window drains to empty before this closes, so every future
+		// above has resolved by then — nats.go closes it only after the ack
+		// or error has been handed to the future. A ctx that dies first
+		// leaves them unresolved, which is what the join below reads.
+		select {
+		case <-c.js.PublishAsyncComplete():
+		case <-ctx.Done():
+		}
+		for i, f := range futs[:sent] {
+			if f == nil {
+				continue // failed synchronously above, already reported
+			}
+			select {
+			case <-f.Ok():
+			case ferr := <-f.Err():
+				failed = append(failed, chunk[i])
+				err = ferr
+			default:
+				failed = append(failed, chunk[i])
+				err = ctx.Err()
+			}
+		}
+		if ctx.Err() != nil {
+			// A dead ctx fails every keep this call never resolved, the
+			// unattempted tail of this chunk included: failed ⊆ keeps is
+			// exhaustive, so a keep the flusher handed over is never
+			// silently dropped between here and the retry queue.
+			failed = append(failed, keeps[start+sent:]...)
+			if err == nil {
+				err = ctx.Err()
+			}
+			return failed, err
 		}
 	}
 	return failed, err
