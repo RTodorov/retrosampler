@@ -151,8 +151,8 @@ func TestPendingIntentDrainsWhenFragmentsExpire(t *testing.T) {
 	}
 }
 
-// Parking MERGES need-bits rather than replacing them, and the tick
-// retries every parked intent, not just one.
+// Parking MERGES need-bits rather than replacing them, and both parked
+// intents reach the flusher.
 //
 // The merge is what keeps a broadcast alive: a local keep parks owing
 // publish+flush, and a later fragment for that now-decided trace parks
@@ -163,9 +163,10 @@ func TestPendingIntentDrainsWhenFragmentsExpire(t *testing.T) {
 // forward carries none (a fragment holds no verdict), so the keep's must
 // survive the merge.
 //
-// Two traces park in the one shard, so the tick's key-snapshot loop is
-// pinned as well: a loop that retried a single intent per tick would
-// leave the second parked forever.
+// Two traces park in the one shard, which pins that neither is stranded
+// by the other's presence. It does NOT pin how many intents one tick
+// retries: the two jobs are collected across ticks under a 5-second
+// bound, so a loop retrying a single intent per tick passes here too.
 func TestParkedIntentsMergeNeedBits(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	flush := make(chan *FlushJob, 1)
@@ -201,7 +202,7 @@ func TestParkedIntentsMergeNeedBits(t *testing.T) {
 		jobs[j.ID] = j
 	}
 	require.Contains(t, jobs, merged)
-	require.Contains(t, jobs, plain, "the tick retries every parked intent, not one")
+	require.Contains(t, jobs, plain, "the second parked intent is not stranded by the first")
 
 	assert.Equal(t, NeedPublish|NeedFlush, jobs[merged].Need,
 		"the forward's flush-only park must not drop the keep's publish")
@@ -211,6 +212,32 @@ func TestParkedIntentsMergeNeedBits(t *testing.T) {
 
 	require.Eventually(t, func() bool { return s.PendingFlushes() == 0 },
 		5*time.Second, time.Millisecond, "both intents drain")
+}
+
+// Parked intents drain oldest-first: with room for exactly one job per
+// tick, three parked intents come out in park order across ticks. Map
+// iteration order (the old pendScratch snapshot) cannot pass this.
+func TestParkedIntentsDrainOldestFirst(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	flush := make(chan *FlushJob, 1)
+	flush <- &FlushJob{} // pre-fill: every send parks until we drain one
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = flush
+	opts.Shards = 1 // all three ids park in the one queue
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	ids := []([16]byte){testID(1), testID(2), testID(3)}
+	for _, id := range ids {
+		require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
+		require.True(t, s.Retry(id, 1, NeedFlush, 0, nil))
+	}
+	<-flush // free the slot; ticks may now send one job at a time
+	for _, want := range ids {
+		j := recvJob(t, flush)
+		assert.Equal(t, want, j.ID, "oldest parked intent drains first")
+	}
 }
 
 // A full flush channel parks the intent per shard; the tick retries it
@@ -306,7 +333,7 @@ func TestParkedPublishInsideWindowRetries(t *testing.T) {
 }
 
 // The deadline is stamped once and survives every re-park, so a publish
-// failing over and over ages out on schedule (ADR-011 r3). retryPending
+// failing over and over ages out on schedule (ADR-011 r3). The drain
 // DELETES the entry before it replays it, so each cycle rebuilds it from
 // scratch: a park that re-derived the deadline from the current clock
 // would push the horizon out by W on every tick and the intent would
@@ -456,6 +483,35 @@ func TestAbandonedIntentDoesNotPoisonTheNextPublish(t *testing.T) {
 	j2 := recvJob(t, flush)
 	assert.NotZero(t, j2.Need&NeedPublish, "the second broadcast is not the first one's to abandon")
 	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned, "and it is not counted as aged out")
+}
+
+// The deadline sweep is not starved by a blocked drain: with a nil
+// flush channel (permanently "full" — nothing can ever send), a parked
+// publish intent past its deadline is still abandoned on the tick.
+// This kills the sweep-folded-into-drain mutant, where abandonment
+// would wait for the intent's drain turn that never comes.
+func TestSweepAbandonsWhileDrainIsBlocked(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = nil // every send parks; the drain can never progress
+	opts.Tick = 10 * time.Millisecond
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	id := testID(9)
+	require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
+	deadline := clk.Now().Add(time.Minute).UnixNano()
+	require.True(t, s.Retry(id, 1, NeedPublish|NeedFlush, deadline, nil))
+	require.Eventually(t, func() bool { return s.Stats().PublishesAbandoned == 0 && s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond, "the intent is parked and inside its deadline")
+
+	clk.Advance(2 * time.Minute) // past the deadline
+	require.Eventually(t, func() bool { return s.Stats().PublishesAbandoned == 1 },
+		5*time.Second, time.Millisecond,
+		"the sweep abandons on schedule even though nothing can drain")
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		5*time.Second, time.Millisecond,
+		"the flush half of the intent survives the abandonment")
 }
 
 // A keep near the window boundary still flushes: the deadline mechanics
