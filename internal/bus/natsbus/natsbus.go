@@ -184,18 +184,21 @@ func (c *Client) Publish(ctx context.Context, keeps []bus.Keep) (failed []bus.Ke
 	if c.nc == nil {
 		return append(failed, keeps...), errors.New("natsbus: Publish before Start")
 	}
-	if c.cfg.Mode == ModeDurable {
-		return c.publishDurable(ctx, keeps)
-	}
-	// Core mode never leaves the process: each publish is a buffer write,
-	// so there is no round trip to amortize and no deadline to honor.
-	for _, k := range keeps {
-		if perr := c.nc.Publish(c.cfg.Subject, encodeKeep(k.ID, k.Reason)); perr != nil {
-			failed = append(failed, k)
-			err = perr
+	if c.cfg.Mode == ModeAtMostOnce {
+		// Core mode never leaves the process: each publish is a buffer
+		// write, so there is no round trip to amortize and no deadline to
+		// honor. Durable is the fall-through on purpose — a mode string
+		// New somehow let past must fail loudly on a nil JetStream rather
+		// than quietly downgrade every keep to fire-and-forget.
+		for _, k := range keeps {
+			if perr := c.nc.Publish(c.cfg.Subject, encodeKeep(k.ID, k.Reason)); perr != nil {
+				failed = append(failed, k)
+				err = perr
+			}
 		}
+		return failed, err
 	}
-	return failed, err
+	return c.publishDurable(ctx, keeps)
 }
 
 // publishDurable pipelines one batch through the async window: publish a
@@ -246,7 +249,11 @@ func (c *Client) publishDurable(ctx context.Context, keeps []bus.Keep) (failed [
 				err = ferr
 			default:
 				failed = append(failed, chunk[i])
-				err = ctx.Err()
+				if err == nil {
+					// A substantive ack error outranks the deadline: it says
+					// why the bus refused, which the deadline never does.
+					err = ctx.Err()
+				}
 			}
 		}
 		if ctx.Err() != nil {
@@ -255,7 +262,10 @@ func (c *Client) publishDurable(ctx context.Context, keeps []bus.Keep) (failed [
 			// exhaustive, so a keep the flusher handed over is never
 			// silently dropped between here and the retry queue.
 			failed = append(failed, keeps[start+sent:]...)
-			if err == nil {
+			if len(failed) > 0 && err == nil {
+				// The deadline is only an error if it cost a keep. Acks that
+				// all landed before ctx expired leave a durable batch, and
+				// the contract admits no error beside an empty failed set.
 				err = ctx.Err()
 			}
 			return failed, err
