@@ -158,6 +158,9 @@ type busSpy struct {
 func newBusSpy() *busSpy { return &busSpy{Bus: bus.NewLoopback()} }
 
 func (b *busSpy) Publish(ctx context.Context, keeps []bus.Keep) ([]bus.Keep, error) {
+	if len(keeps) == 0 {
+		return nil, nil // nothing to fail, even while failing
+	}
 	if b.failing.Load() {
 		return append([]bus.Keep(nil), keeps...), errors.New("bus unavailable")
 	}

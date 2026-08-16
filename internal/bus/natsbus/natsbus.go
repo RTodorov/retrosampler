@@ -164,6 +164,12 @@ func (c *Client) Close() error {
 // fails lands in failed for the flusher's retry machinery, bounded by
 // the ADR-011 r3 intent deadline.
 func (c *Client) Publish(ctx context.Context, keeps []bus.Keep) (failed []bus.Keep, err error) {
+	if len(keeps) == 0 {
+		// An empty batch is vacuously durable, Start or no Start: there is
+		// nothing to fail, and the contract admits no error alongside an
+		// empty failed set.
+		return nil, nil
+	}
 	if c.nc == nil {
 		return append(failed, keeps...), errors.New("natsbus: Publish before Start")
 	}
