@@ -272,7 +272,9 @@ func TestVerdictBeforeSpans(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	p, _ := startTestProcessor(t, sink, lb)
 	id := pcommon.TraceID{0x42}
-	require.NoError(t, lb.Publish(context.Background(), id, bus.ReasonError))
+	failed, err := lb.Publish(context.Background(), []bus.Keep{{ID: id, Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	require.Eventually(t, func() bool {
 		s := p.set.Load()
 		return s != nil && s.DecidedEntries() == 1
@@ -282,7 +284,7 @@ func TestVerdictBeforeSpans(t *testing.T) {
 	sp := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	sp.SetTraceID(id)
 	sp.SetName("late")
-	_, err := p.processTraces(context.Background(), td)
+	_, err = p.processTraces(context.Background(), td)
 	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
 	require.Eventually(t, func() bool { return sink.SpanCount() == 1 },
 		5*time.Second, time.Millisecond, "late spans flush through the decided set")
@@ -428,9 +430,9 @@ func (l *lifecycleBus) Close() error {
 	return nil
 }
 
-func (l *lifecycleBus) Publish(ctx context.Context, id [16]byte, reason byte) error {
+func (l *lifecycleBus) Publish(ctx context.Context, keeps []bus.Keep) ([]bus.Keep, error) {
 	l.record("publish")
-	return l.Bus.Publish(ctx, id, reason)
+	return l.Bus.Publish(ctx, keeps)
 }
 
 func (l *lifecycleBus) Subscribe(fn func(id [16]byte, reason byte)) (func(), error) {
@@ -749,7 +751,9 @@ func TestStaticCensusAlive(t *testing.T) {
 	sp.SetName("subscriber-alive")
 	_, err = p.processTraces(ctx, td)
 	require.ErrorIs(t, err, processorhelper.ErrSkipProcessingData)
-	require.NoError(t, lb.Publish(ctx, deaf, bus.ReasonError))
+	failed, err := lb.Publish(ctx, []bus.Keep{{ID: deaf, Reason: bus.ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	require.Eventually(t, func() bool { return sink.SpanCount() == 2 },
 		5*time.Second, time.Millisecond,
 		"the bus subscription must be live and routing keeps into the shards")

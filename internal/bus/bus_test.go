@@ -41,7 +41,9 @@ func TestLoopbackFansOutToEverySubscriber(t *testing.T) {
 	require.NoError(t, err)
 	defer cancelB()
 
-	require.NoError(t, lb.Publish(context.Background(), [16]byte{1}, ReasonError))
+	failed, err := lb.Publish(context.Background(), []Keep{{ID: [16]byte{1}, Reason: ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	require.Eventually(t, func() bool { return a.count() == 1 && b.count() == 1 },
 		time.Second, time.Millisecond, "broadcast reaches every subscriber, publisher included")
 }
@@ -53,7 +55,9 @@ func TestLoopbackCancelStopsDeliveryAndGoroutine(t *testing.T) {
 	require.NoError(t, err)
 	cancel()
 	cancel() // idempotent
-	require.NoError(t, lb.Publish(context.Background(), [16]byte{2}, ReasonError))
+	failed, err := lb.Publish(context.Background(), []Keep{{ID: [16]byte{2}, Reason: ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 	time.Sleep(10 * time.Millisecond)
 	assert.Zero(t, r.count(), "cancelled subscriber receives nothing")
 	// goleak's TestMain proves the delivery goroutine exited.
@@ -75,5 +79,7 @@ func TestLoopbackCancelDeregistersSubscriber(t *testing.T) {
 }
 
 func TestLoopbackPublishWithNoSubscribersIsANoOp(t *testing.T) {
-	require.NoError(t, NewLoopback().Publish(context.Background(), [16]byte{3}, ReasonError))
+	failed, err := NewLoopback().Publish(context.Background(), []Keep{{ID: [16]byte{3}, Reason: ReasonError}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
 }

@@ -99,7 +99,7 @@ func (fl *flusher) process(j *shards.FlushJob) {
 	ctx := context.Background()
 	need := j.Need
 	if need&shards.NeedPublish != 0 {
-		if err := fl.b.Publish(ctx, j.ID, j.Reason); err != nil {
+		if failed, _ := fl.b.Publish(ctx, []bus.Keep{{ID: j.ID, Reason: j.Reason}}); len(failed) > 0 {
 			fl.publishErrors.Add(1)
 			fl.retry(j, need)
 			return

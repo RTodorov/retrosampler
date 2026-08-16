@@ -158,20 +158,35 @@ func (c *Client) Close() error {
 	return err
 }
 
-// Publish broadcasts one keep. Core mode is fire-and-forget into the
-// connection buffer (at-most-once by contract); durable mode is a
-// synchronous acked JetStream publish honoring ctx — a non-nil error is
-// the flusher's to retry, bounded by the ADR-011 r3 intent deadline.
-func (c *Client) Publish(ctx context.Context, id [16]byte, reason byte) error {
+// Publish broadcasts a batch of keeps. Core mode is fire-and-forget
+// into the connection buffer per keep (at-most-once by contract);
+// durable mode is acked JetStream publishing honoring ctx. Whatever
+// fails lands in failed for the flusher's retry machinery, bounded by
+// the ADR-011 r3 intent deadline.
+func (c *Client) Publish(ctx context.Context, keeps []bus.Keep) (failed []bus.Keep, err error) {
 	if c.nc == nil {
-		return errors.New("natsbus: Publish before Start")
+		return append(failed, keeps...), errors.New("natsbus: Publish before Start")
 	}
-	payload := encodeKeep(id, reason)
-	if c.cfg.Mode == ModeAtMostOnce {
-		return c.nc.Publish(c.cfg.Subject, payload)
+	for i, k := range keeps {
+		var perr error
+		if c.cfg.Mode == ModeAtMostOnce {
+			perr = c.nc.Publish(c.cfg.Subject, encodeKeep(k.ID, k.Reason))
+		} else {
+			_, perr = c.js.Publish(ctx, c.cfg.Subject, encodeKeep(k.ID, k.Reason))
+		}
+		if perr != nil {
+			failed = append(failed, k)
+			err = perr
+			if ctx.Err() != nil {
+				// A dead ctx fails every keep still unattempted; keep
+				// the contract's failed ⊆ keeps exhaustive rather than
+				// burning a timeout per remaining keep.
+				failed = append(failed, keeps[i+1:]...)
+				return failed, err
+			}
+		}
 	}
-	_, err := c.js.Publish(ctx, c.cfg.Subject, payload)
-	return err
+	return failed, err
 }
 
 // Subscribe registers fn. Core mode subscribes directly; durable mode

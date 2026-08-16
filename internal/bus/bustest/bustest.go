@@ -82,6 +82,15 @@ func (r *recorded) has(id [16]byte) bool {
 
 func tid(n byte) (id [16]byte) { id[0] = n; id[15] = 1; return id }
 
+// pub1 publishes one keep through the batch contract and asserts the
+// healthy-path invariant: no failures, no error.
+func pub1(t *testing.T, b bus.Bus, id [16]byte, reason byte) {
+	t.Helper()
+	failed, err := b.Publish(context.Background(), []bus.Keep{{ID: id, Reason: reason}})
+	require.NoError(t, err)
+	require.Empty(t, failed)
+}
+
 // RunContract runs the tier every implementation must pass. mk is
 // called once per subtest and must register cleanup on t.
 func RunContract(t *testing.T, mk func(t *testing.T) bus.Bus) {
@@ -96,7 +105,7 @@ func RunContract(t *testing.T, mk func(t *testing.T) bus.Bus) {
 		c2, err := b.Subscribe(r2.add)
 		require.NoError(t, err)
 		defer c2()
-		require.NoError(t, b.Publish(context.Background(), tid(1), bus.ReasonError))
+		pub1(t, b, tid(1), bus.ReasonError)
 		require.Eventually(t, func() bool { return r1.count() == 1 && r2.count() == 1 },
 			5*time.Second, time.Millisecond, "every subscriber, publisher's own included")
 		id, reason, ok := r1.last()
@@ -112,10 +121,28 @@ func RunContract(t *testing.T, mk func(t *testing.T) bus.Bus) {
 		c, err := b.Subscribe(r.add)
 		require.NoError(t, err)
 		defer c()
-		require.NoError(t, b.Publish(context.Background(), tid(2), bus.ReasonPolicy))
-		require.NoError(t, b.Publish(context.Background(), tid(2), bus.ReasonPolicy))
+		pub1(t, b, tid(2), bus.ReasonPolicy)
+		pub1(t, b, tid(2), bus.ReasonPolicy)
 		require.Eventually(t, func() bool { return r.count() == 2 },
 			5*time.Second, time.Millisecond)
+	})
+
+	t.Run("batch_fans_out_every_keep", func(t *testing.T) {
+		b := mk(t)
+		var r recorded
+		c, err := b.Subscribe(r.add)
+		require.NoError(t, err)
+		defer c()
+		failed, err := b.Publish(context.Background(), []bus.Keep{
+			{ID: tid(5), Reason: bus.ReasonError},
+			{ID: tid(6), Reason: bus.ReasonPolicy},
+			{ID: tid(7), Reason: bus.ReasonSpanLatency},
+		})
+		require.NoError(t, err)
+		require.Empty(t, failed, "a healthy bus fails nothing")
+		require.Eventually(t, func() bool {
+			return r.has(tid(5)) && r.has(tid(6)) && r.has(tid(7))
+		}, 5*time.Second, time.Millisecond, "one batch call delivers every keep in it")
 	})
 
 	t.Run("cancel_is_idempotent_and_deregisters", func(t *testing.T) {
@@ -125,7 +152,7 @@ func RunContract(t *testing.T, mk func(t *testing.T) bus.Bus) {
 		require.NoError(t, err)
 		c()
 		c() // idempotent
-		require.NoError(t, b.Publish(context.Background(), tid(3), bus.ReasonError))
+		pub1(t, b, tid(3), bus.ReasonError)
 		time.Sleep(50 * time.Millisecond) // absence needs a bounded wait
 		assert.Zero(t, r.count(), "a cancelled subscriber receives nothing")
 	})
@@ -139,7 +166,7 @@ func RunContract(t *testing.T, mk func(t *testing.T) bus.Bus) {
 		c2, err := b.Subscribe(r2.add)
 		require.NoError(t, err)
 		defer c2()
-		require.NoError(t, b.Publish(context.Background(), tid(4), bus.ReasonSpanLatency))
+		pub1(t, b, tid(4), bus.ReasonSpanLatency)
 		require.Eventually(t, func() bool { return r2.count() == 1 },
 			5*time.Second, time.Millisecond)
 		assert.Zero(t, r1.count())
@@ -169,7 +196,7 @@ func RunHardening(t *testing.T, h Harness) {
 		})
 		require.NoError(t, err)
 		cancelc <- c
-		require.NoError(t, b.Publish(context.Background(), tid(41), bus.ReasonError))
+		pub1(t, b, tid(41), bus.ReasonError)
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
@@ -201,7 +228,7 @@ func RunHardening(t *testing.T, h Harness) {
 		require.NoError(t, err)
 		defer cl()
 		pub := h.Mk(t)
-		require.NoError(t, pub.Publish(context.Background(), tid(42), bus.ReasonError))
+		pub1(t, pub, tid(42), bus.ReasonError)
 		// The wedge is the precondition of the claim, so it is established
 		// before the claim is tested rather than confirmed after it. Read
 		// the other way round, a live delivery that won the dispatch race
@@ -225,7 +252,7 @@ func RunHardening(t *testing.T, h Harness) {
 		c, err := b.Subscribe(r.add)
 		require.NoError(t, err)
 		defer c()
-		require.NoError(t, b.Publish(context.Background(), tid(43), bus.ReasonError))
+		pub1(t, b, tid(43), bus.ReasonError)
 		require.Eventually(t, func() bool { return r.has(tid(43)) },
 			10*time.Second, 10*time.Millisecond, "delivery works before the bounce")
 		h.StopServer(t)
@@ -239,7 +266,7 @@ func RunHardening(t *testing.T, h Harness) {
 		// connects immediately. The claim is that the subscription
 		// resumes, not that the bounce conserved a keep.
 		require.Eventually(t, func() bool {
-			if err := pub.Publish(context.Background(), tid(44), bus.ReasonError); err != nil {
+			if failed, err := pub.Publish(context.Background(), []bus.Keep{{ID: tid(44), Reason: bus.ReasonError}}); err != nil || len(failed) > 0 {
 				return false
 			}
 			return r.has(tid(44))
@@ -266,10 +293,19 @@ func RunDurable(t *testing.T, h Harness) {
 		// tested is the one under test: it must come back on ctx, well
 		// inside any transport timeout it might otherwise wait out.
 		errc := make(chan error, 1)
-		go func() { errc <- b.Publish(ctx, tid(40), bus.ReasonError) }()
+		failedc := make(chan []bus.Keep, 1)
+		go func() {
+			failed, err := b.Publish(ctx, []bus.Keep{
+				{ID: tid(40), Reason: bus.ReasonError},
+				{ID: tid(46), Reason: bus.ReasonPolicy},
+			})
+			failedc <- failed
+			errc <- err
+		}()
 		select {
 		case err := <-errc:
 			require.Error(t, err, "an unreachable durable bus must refuse, not swallow")
+			assert.Len(t, <-failedc, 2, "every unresolved keep is reported failed (failed ⊆ keeps)")
 		case <-time.After(5 * time.Second):
 			t.Fatal("Publish ignored ctx and parked on a transport timeout instead")
 		}
@@ -277,7 +313,7 @@ func RunDurable(t *testing.T, h Harness) {
 
 	t.Run("fresh_subscribe_replays_backlog", func(t *testing.T) {
 		pub := h.Mk(t)
-		require.NoError(t, pub.Publish(context.Background(), tid(45), bus.ReasonPolicy))
+		pub1(t, pub, tid(45), bus.ReasonPolicy)
 		late := h.Mk(t) // built, and subscribed, only after the publish
 		var r recorded
 		c, err := late.Subscribe(r.add)
