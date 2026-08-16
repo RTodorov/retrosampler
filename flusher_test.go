@@ -63,10 +63,21 @@ func newFlakyConsumer(t *testing.T, fail *atomic.Bool, sink consumer.Traces) con
 // enough for a retry sweep to land inside a test.
 func newFlushTestSet(t *testing.T, jobs chan *shards.FlushJob, clk *fakeProcClock) *shards.Set {
 	t.Helper()
+	return newFlushTestSetTick(t, jobs, clk, 10*time.Millisecond)
+}
+
+// newFlushTestSetTick is newFlushTestSet with the sweep interval chosen
+// by the caller. A test that reads a counter in the gap between two
+// tick-driven retries needs that gap wider than the poll observing it,
+// or the next sweep's retry lands inside the assertion.
+func newFlushTestSetTick(t *testing.T, jobs chan *shards.FlushJob, clk *fakeProcClock,
+	tick time.Duration,
+) *shards.Set {
+	t.Helper()
 	set, err := shards.New(shards.Options{
 		Dir: t.TempDir(), Shards: 1, Window: time.Hour, SegmentSize: 1 << 20,
 		DiskBudget: 1 << 40, WatermarkPct: 80, WindowFloor: time.Minute,
-		Now: clk.Now, Tick: 10 * time.Millisecond, Flush: jobs,
+		Now: clk.Now, Tick: tick, Flush: jobs,
 	})
 	require.NoError(t, err)
 	return set
@@ -612,4 +623,211 @@ func TestFlusherRecordsAgeRatioOnRefusedFlush(t *testing.T) {
 	recorded := spy.recorded()
 	require.Len(t, recorded, 1, "the batch the consumer refused was sampled too")
 	assert.InDelta(t, 0.5, recorded[0], 0.001)
+}
+
+// batchSpy extends busSpy with call-shape recording and a scripted
+// per-keep failure set, for the batching tests only.
+type batchSpy struct {
+	busSpy
+	mu2      sync.Mutex
+	calls    [][]bus.Keep
+	failIDs  map[[16]byte]bool // keeps to report failed, by id
+	blockCtx atomic.Bool       // park in Publish until ctx dies
+}
+
+func newBatchSpy() *batchSpy {
+	return &batchSpy{busSpy: busSpy{Bus: bus.NewLoopback()}, failIDs: map[[16]byte]bool{}}
+}
+
+func (b *batchSpy) Publish(ctx context.Context, keeps []bus.Keep) ([]bus.Keep, error) {
+	b.mu2.Lock()
+	b.calls = append(b.calls, append([]bus.Keep(nil), keeps...))
+	b.mu2.Unlock()
+	if b.blockCtx.Load() {
+		<-ctx.Done()
+		return append([]bus.Keep(nil), keeps...), ctx.Err()
+	}
+	var failed []bus.Keep
+	var ok []bus.Keep
+	for _, k := range keeps {
+		if b.failIDs[k.ID] {
+			failed = append(failed, k)
+		} else {
+			ok = append(ok, k)
+		}
+	}
+	if len(ok) > 0 {
+		_, _ = b.busSpy.Publish(ctx, ok)
+	}
+	if len(failed) > 0 {
+		return failed, errors.New("scripted failure")
+	}
+	return nil, nil
+}
+
+func (b *batchSpy) callSizes() []int {
+	b.mu2.Lock()
+	defer b.mu2.Unlock()
+	sizes := make([]int, len(b.calls))
+	for i, c := range b.calls {
+		sizes[i] = len(c)
+	}
+	return sizes
+}
+
+// Occupancy IS the batch: jobs already queued when the flusher frees up
+// share one Publish call. Preloading before start() makes the occupancy
+// deterministic.
+func TestFlusherBatchesByQueueOccupancy(t *testing.T) {
+	jobs := make(chan *shards.FlushJob, 8)
+	sink := new(consumertest.TracesSink)
+	spy := newBatchSpy()
+	for i := byte(1); i <= 3; i++ {
+		id := pcommon.TraceID{i}
+		jobs <- &shards.FlushJob{
+			ID: id, Reason: bus.ReasonError, Need: shards.NeedPublish | shards.NeedFlush,
+			Frags: [][]byte{encodeFrag(t, id, "s")},
+		}
+	}
+	fl := newFlusher(jobs, nil, sink, spy, 0, nil, nil)
+	fl.start()
+	defer func() { require.NoError(t, fl.stop(context.Background())) }()
+	require.Eventually(t, func() bool { return sink.SpanCount() == 3 },
+		5*time.Second, time.Millisecond)
+	require.Equal(t, []int{3}, spy.callSizes(),
+		"three queued jobs ride one Publish; batching is occupancy, not a timer")
+	assert.Equal(t, uint64(3), fl.publishedKeeps.Load())
+}
+
+// A partial failure re-parks ONLY the failed keep's job, with its
+// original deadline, and skips that job's consume; the rest of the
+// batch publishes and flushes normally.
+func TestFlusherPartialFailureReparksOnlyTheFailedJob(t *testing.T) {
+	clk := newFakeProcClock(time.Unix(5000, 0))
+	jobs := make(chan *shards.FlushJob, 8)
+	// A slow sweep: the counters below are read in the window between the
+	// flusher's own re-park and the next tick's replay of it.
+	set := newFlushTestSetTick(t, jobs, clk, 500*time.Millisecond)
+	defer func() { require.NoError(t, set.Shutdown(context.Background())) }()
+	sink := new(consumertest.TracesSink)
+	spy := newBatchSpy()
+	bad := pcommon.TraceID{0xBA}
+	good := pcommon.TraceID{0x60}
+	spy.failIDs[bad] = true
+	deadline := clk.Now().Add(time.Hour).UnixNano()
+	jobs <- &shards.FlushJob{
+		ID: bad, Reason: bus.ReasonError,
+		Need: shards.NeedPublish | shards.NeedFlush, Deadline: deadline,
+		Frags: [][]byte{encodeFrag(t, bad, "bad-span")},
+	}
+	jobs <- &shards.FlushJob{
+		ID: good, Reason: bus.ReasonPolicy,
+		Need: shards.NeedPublish | shards.NeedFlush, Deadline: deadline,
+		Frags: [][]byte{encodeFrag(t, good, "good-span")},
+	}
+	fl := newFlusher(jobs, set, sink, spy, 0, nil, nil)
+	fl.start()
+	defer func() { require.NoError(t, fl.stop(context.Background())) }()
+
+	require.Eventually(t, func() bool {
+		return len(spanNames(sink)) >= 1 && set.Stats().FlushRetries >= 1
+	}, 5*time.Second, time.Millisecond)
+	sizes := spy.callSizes()
+	require.NotEmpty(t, sizes)
+	assert.Equal(t, 2, sizes[0],
+		"both jobs rode one Publish: the failure is partial, not a whole refused call")
+	assert.Equal(t, []string{"good-span"}, spanNames(sink),
+		"the failed publish's consume is skipped; the good job flushes")
+	assert.Equal(t, uint64(1), fl.publishErrors.Load(), "per failed keep")
+	assert.Equal(t, uint64(1), fl.publishedKeeps.Load(), "per acked keep")
+	// The re-parked intent replays off the shard tick and, with the spy
+	// still scripted to fail it, keeps retrying rather than dying.
+	require.Eventually(t, func() bool { return set.Stats().FlushRetries >= 2 },
+		5*time.Second, time.Millisecond, "the failed job is retried with its need intact")
+}
+
+// stop() cannot hang on a publish whose acks never come: the join is
+// bounded by the flusher's stop signal.
+func TestFlusherStopBoundsAWedgedPublish(t *testing.T) {
+	jobs := make(chan *shards.FlushJob, 2)
+	spy := newBatchSpy()
+	spy.blockCtx.Store(true)
+	fl := newFlusher(jobs, nil, new(consumertest.TracesSink), spy, 0, nil, nil)
+	fl.start()
+	jobs <- &shards.FlushJob{
+		ID: pcommon.TraceID{0xEE}, Reason: bus.ReasonError,
+		Need: shards.NeedPublish,
+	}
+	require.Eventually(t, func() bool { return len(spy.callSizes()) >= 1 },
+		5*time.Second, time.Millisecond, "the publish is in flight and parked on ctx")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, fl.stop(ctx), "stop must cancel the join, not wait out the wedge")
+}
+
+// ctxSpy records whether each Publish arrived under a context that was
+// already dead, and refuses those the way a real bus would.
+type ctxSpy struct {
+	bus.Bus
+	mu    sync.Mutex
+	dead  int
+	acked int
+}
+
+func (b *ctxSpy) Publish(ctx context.Context, keeps []bus.Keep) ([]bus.Keep, error) {
+	if len(keeps) == 0 {
+		return nil, nil
+	}
+	b.mu.Lock()
+	dead := ctx.Err() != nil
+	if dead {
+		b.dead++
+	} else {
+		b.acked += len(keeps)
+	}
+	b.mu.Unlock()
+	if dead {
+		return append([]bus.Keep(nil), keeps...), ctx.Err()
+	}
+	return nil, nil
+}
+
+func (b *ctxSpy) counts() (dead, acked int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.dead, b.acked
+}
+
+// Jobs already queued when the flusher starts up stopped must still get a
+// real publish attempt, whichever branch of the run loop collects them.
+// Both cases of that select are ready at once and Go picks uniformly, so
+// a publish context keyed to the spent stop signal would refuse a whole
+// shutdown backlog's broadcasts on a coin flip.
+//
+// The signal is closed BEFORE the goroutine exists so the branch it picks
+// is the only variable: a stop racing a publish already in flight is the
+// separate, deliberate wedge case above. Repeated because one round only
+// samples one flip.
+func TestFlusherDrainPublishesUnderALiveContext(t *testing.T) {
+	const rounds = 50
+	for range rounds {
+		jobs := make(chan *shards.FlushJob, 4)
+		spy := &ctxSpy{Bus: bus.NewLoopback()}
+		fl := newFlusher(jobs, nil, consumertest.NewNop(), spy, 0, nil, nil)
+		for i := byte(1); i <= 3; i++ {
+			jobs <- &shards.FlushJob{
+				ID:     pcommon.TraceID{i},
+				Reason: bus.ReasonError, Need: shards.NeedPublish,
+			}
+		}
+		// Through stopOnce, so the stop below finds the signal already spent
+		// rather than closing it twice.
+		fl.stopOnce.Do(func() { close(fl.stopc) })
+		fl.start()
+		require.NoError(t, fl.stop(context.Background()))
+
+		dead, acked := spy.counts()
+		require.Zero(t, dead, "the drain published under a context stop had already spent")
+		require.Equal(t, 3, acked, "every queued keep was broadcast, not dropped")
+	}
 }
