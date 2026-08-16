@@ -5,6 +5,8 @@ package shards
 
 import (
 	"context"
+	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -244,6 +246,81 @@ func TestParkedIntentsDrainOldestFirst(t *testing.T) {
 		j := recvJob(t, flush)
 		assert.Equal(t, want, j.ID, "oldest parked intent drains first")
 	}
+}
+
+// A merge into an intent already waiting in pendq keeps its ONE place in
+// line: the entry's queue-membership bit is what stops the second park
+// from enqueueing the id again. Without it the queue grows a slot per
+// park EVENT — every re-park of a wedged intent, every late fragment for
+// a decided trace — while pend still holds the single entry all of them
+// merged into, so pendq outgrows the work it indexes and the drain walks
+// tombstones to reach live intents.
+//
+// White-box because a duplicate slot is invisible from outside: both
+// name the same id, so a drain serves the entry at the first and skips
+// the second as a tombstone. The count in pendq is the whole claim.
+func TestMergedParkQueuesTheIDOnce(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	s := &Set{opts: Options{Now: clk.Now, Window: time.Hour}}
+	sh := &shard{pend: make(map[[16]byte]pendReq)}
+
+	id := testID(31)
+	deadline := clk.Now().Add(time.Minute).UnixNano()
+	sh.park(s, id, 7, NeedPublish|NeedFlush, deadline) // a local keep
+	sh.park(s, id, 0, NeedFlush, 0)                    // a late fragment's forward
+	sh.park(s, id, 0, NeedFlush, 0)                    // and another
+
+	require.Len(t, sh.pendq, 1, "one queue slot per id, however many parks merge into it")
+	require.Len(t, sh.pend, 1)
+	req := sh.pend[id]
+	assert.Equal(t, NeedPublish|NeedFlush, req.need, "the merge keeps both bits")
+	assert.Equal(t, deadline, req.deadline, "and the deadline its publish arrived with")
+	assert.Equal(t, byte(7), req.reason, "first nonzero reason still wins")
+	assert.True(t, req.queued, "the entry knows it is in line")
+}
+
+// compactPendq bounds pendq's STORAGE, not merely its length. A
+// saturation episode appends a slot per park event, so the backing array
+// grows with events rather than with the intents it indexes, and
+// reslicing to zero hands that peak array back to the same shard for the
+// life of the process — the pendScratch it replaced could not, being
+// sized by peak entries. The release is what stops one burst from
+// becoming the baseline.
+func TestCompactPendqReleasesTheEpisodePeakArray(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	s := &Set{opts: Options{Now: clk.Now, Window: time.Hour}}
+	const episode = 8 * pendqShrinkCap
+
+	sh := &shard{pend: make(map[[16]byte]pendReq)}
+	for i := range uint64(episode) {
+		sh.park(s, testID(i), 1, NeedFlush, 0)
+	}
+	peak := cap(sh.pendq)
+	require.Greater(t, peak, pendqShrinkCap, "the fixture builds an oversized array")
+
+	sh.pendqHead = len(sh.pendq) // the whole episode drains, nothing re-parks
+	sh.compactPendq()
+	require.Empty(t, sh.pendq, "an emptied queue holds no entries")
+	require.Zero(t, sh.pendqHead)
+	assert.Less(t, cap(sh.pendq), peak/4, "and does not keep the peak array either")
+
+	// A partial drain moves the live tail down onto an array sized to it,
+	// and settles: the shrink leaves length within a size class of
+	// capacity, so it cannot retrigger and reallocate tick after tick.
+	const live = 16
+	sh = &shard{pend: make(map[[16]byte]pendReq)}
+	for i := range uint64(episode) {
+		sh.park(s, testID(i), 1, NeedFlush, 0)
+	}
+	sh.pendqHead = len(sh.pendq) - live
+	sh.compactPendq()
+	require.Len(t, sh.pendq, live, "the live tail survives the compaction")
+	require.Zero(t, sh.pendqHead)
+	assert.LessOrEqual(t, cap(sh.pendq), pendqShrinkCap, "on an array sized to it")
+
+	fitted := cap(sh.pendq)
+	sh.compactPendq()
+	assert.Equal(t, fitted, cap(sh.pendq), "a second pass reallocates nothing")
 }
 
 // A full flush channel parks the intent per shard; the tick retries it
@@ -491,37 +568,93 @@ func TestAbandonedIntentDoesNotPoisonTheNextPublish(t *testing.T) {
 	assert.Equal(t, uint64(1), s.Stats().PublishesAbandoned, "and it is not counted as aged out")
 }
 
-// The deadline sweep is not starved by a blocked drain: with a nil
-// flush channel (permanently "full" — nothing can ever send), a parked
-// publish intent past its deadline is still abandoned on the tick.
+// The deadline sweep is not starved by a blocked drain: with a nil flush
+// channel (permanently "full" — nothing can ever send), a parked publish
+// intent past its deadline is still abandoned on the tick.
 //
-// This kills nothing today, and says so: an ungated drain reaches every
-// intent every tick, so a sweep folded back into it abandons on the same
-// tick and passes this too (measured, with the fold applied). The pin is
-// here for the gated drain, which stops at its head — there the split is
-// the only thing keeping abandonment on a schedule of its own.
+// The subject sits BEHIND a blocker on purpose, and that is what gives
+// the pin its teeth. The gated drain stops at the head every tick, so
+// the intent under test is never visited by it at all: only a sweep on a
+// schedule of its own can abandon it. Folding the deadline check back
+// into the drain walk — the obvious simplification, one pass instead of
+// two — leaves it parked past W forever, and that fold is what this
+// fails on (measured, with the fold applied). Behind an ungated drain
+// the same fold passed, because that drain reached every intent every
+// tick; the gate is what promoted this from documentation to a pin.
 func TestSweepAbandonsWhileDrainIsBlocked(t *testing.T) {
 	clk := newFakeClock(time.Unix(1000, 0))
 	opts := testOptions(t.TempDir(), clk)
 	opts.Flush = nil // every send parks; the drain can never progress
+	opts.Shards = 1  // one queue, so the blocker is genuinely in front
 	opts.Tick = 10 * time.Millisecond
 	s := mustNew(t, opts)
 	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
 
-	id := testID(9)
+	// blocker holds the head: its fragment collects, its send finds the
+	// channel full, and the drain stops there for good.
+	blocker, id := testID(8), testID(9)
+	require.True(t, s.Offer(blocker, []byte("frag"), clk.Now()))
 	require.True(t, s.Offer(id, []byte("frag"), clk.Now()))
+	require.True(t, s.Retry(blocker, 1, NeedFlush, 0, nil))
 	deadline := clk.Now().Add(time.Minute).UnixNano()
 	require.True(t, s.Retry(id, 1, NeedPublish|NeedFlush, deadline, nil))
-	require.Eventually(t, func() bool { return s.Stats().PublishesAbandoned == 0 && s.PendingFlushes() == 1 },
-		5*time.Second, time.Millisecond, "the intent is parked and inside its deadline")
+	require.Eventually(t, func() bool { return s.Stats().PublishesAbandoned == 0 && s.PendingFlushes() == 2 },
+		5*time.Second, time.Millisecond, "both intents are parked, the publish inside its deadline")
 
 	clk.Advance(2 * time.Minute) // past the deadline
 	require.Eventually(t, func() bool { return s.Stats().PublishesAbandoned == 1 },
 		5*time.Second, time.Millisecond,
-		"the sweep abandons on schedule even though nothing can drain")
-	require.Eventually(t, func() bool { return s.PendingFlushes() == 1 },
+		"the sweep abandons on schedule though the drain never reaches the intent")
+	require.Eventually(t, func() bool { return s.PendingFlushes() == 2 },
 		5*time.Second, time.Millisecond,
 		"the flush half of the intent survives the abandonment")
+}
+
+// The drain is gated by the flush channel, not sized by the backlog:
+// with the channel permanently full and 40 intents parked in ONE shard,
+// each tick performs at most one whole-trace Collect. The ungated drain
+// did 40 per tick — retrying the entire backlog against a flusher that
+// refused its first job — so this is the O(pending) amplification pin.
+//
+// Shards is 1 so the whole backlog sits behind one gate: the claim is
+// per shard per tick, and four workers would spend four Collects a tick
+// for the same reason one spends one.
+func TestBlockedDrainCollectsAtMostOncePerTick(t *testing.T) {
+	clk := newFakeClock(time.Unix(1000, 0))
+	var collects atomic.Int64
+	opts := testOptions(t.TempDir(), clk)
+	opts.Flush = nil // permanently full: nothing ever sends
+	opts.Shards = 1
+	opts.Tick = 10 * time.Millisecond
+	opts.collectHook = func() { collects.Add(1) }
+	s := mustNew(t, opts)
+	defer func() { require.NoError(t, s.Shutdown(context.Background())) }()
+
+	const parked = 40
+	for i := range uint64(parked) {
+		id := testID(i + 1)
+		// Each intent must hold a fragment: one whose Collect comes back
+		// empty owes nothing, and the drain walks past it instead of
+		// parking on the gate. Offer sheds on a momentarily full ring, so
+		// it is retried rather than required outright.
+		accepted := false
+		for attempt := 0; attempt < 1<<20 && !accepted; attempt++ {
+			if accepted = s.Offer(id, []byte("frag"), clk.Now()); !accepted {
+				runtime.Gosched()
+			}
+		}
+		require.True(t, accepted, "shard never freed a buffer for the fixture")
+		require.True(t, s.Retry(id, 1, NeedFlush, 0, nil))
+	}
+	require.Eventually(t, func() bool { return s.PendingFlushes() == parked },
+		5*time.Second, time.Millisecond, "the whole backlog is parked before the measurement")
+
+	base := collects.Load()            // enqueueing does not Collect; only keep() and the drain do
+	time.Sleep(150 * time.Millisecond) // ~15 ticks of wall clock
+	got := collects.Load() - base
+	require.Positive(t, got, "the drain is alive — it tries its head intent")
+	require.Less(t, got, int64(parked),
+		"a blocked tick costs ~1 Collect, never O(pending); 15 ungated ticks would be ~600")
 }
 
 // A keep near the window boundary still flushes: the deadline mechanics

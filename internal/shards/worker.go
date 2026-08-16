@@ -248,25 +248,54 @@ func (sh *shard) keep(s *Set, fb *fragBuf) {
 	sh.collectAndSend(s, fb.id, fb.reason, need, fb.at.Add(s.opts.Window).UnixNano())
 }
 
-// collectAndSend builds id's job from the buffer and hands it to the
-// flusher, parking the intent on a full channel. A zero-fragment job
-// still goes out when it owes a publish — the verdict must broadcast even
-// when this batch's fragments were refused.
-func (sh *shard) collectAndSend(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
+// sendOutcome says what one collect-and-hand-off attempt did, so a
+// caller can tell the capacity signal apart from the other ways an
+// attempt ends. Only sendFull means the flusher is the constraint.
+type sendOutcome uint8
+
+const (
+	sentOK      sendOutcome = iota // job handed to the flusher
+	sendFull                       // channel full — the capacity signal
+	collectErr                     // buffer read failure — not capacity
+	nothingOwed                    // zero frags, no publish: intent dies
+)
+
+// collectOnce builds id's job from the buffer and tries the non-blocking
+// flusher handoff, parking NOTHING: each outcome is the caller's to
+// interpret. A zero-fragment job still goes out when it owes a publish —
+// the verdict must broadcast even when this batch's fragments were
+// refused.
+func (sh *shard) collectOnce(s *Set, id [16]byte, reason byte, need Need, deadline int64) sendOutcome {
+	if s.opts.collectHook != nil {
+		s.opts.collectHook()
+	}
 	j := &FlushJob{ID: id, Reason: reason, Need: need, Deadline: deadline}
 	skipped, err := sh.buf.Collect(id, func(frag []byte) {
 		j.Frags = append(j.Frags, append([]byte(nil), frag...))
 	})
 	s.corruptFragments.Add(lenU64(skipped))
 	if err != nil {
-		// Read failure: the fragments stay on disk, so retry on the tick.
-		sh.park(s, id, reason, need, deadline)
-		return
+		return collectErr // fragments stay on disk; the intent should retry
 	}
 	if len(j.Frags) == 0 && need&NeedPublish == 0 {
-		return // pending keep: later arrivals forward themselves
+		return nothingOwed // pending keep: later arrivals forward themselves
 	}
-	sh.sendJob(s, j)
+	select {
+	case s.opts.Flush <- j:
+		return sentOK
+	default:
+		return sendFull
+	}
+}
+
+// collectAndSend is the keep path's wrapper: any outcome that leaves
+// work owed parks it for the tick's drain to replay.
+func (sh *shard) collectAndSend(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
+	switch sh.collectOnce(s, id, reason, need, deadline) {
+	case sendFull, collectErr:
+		sh.park(s, id, reason, need, deadline)
+	case sentOK, nothingOwed:
+	}
 }
 
 // sendJob is the non-blocking flusher handoff; a full channel parks the
@@ -345,27 +374,92 @@ func (sh *shard) sweepPending(s *Set, now int64) {
 // Collect each, at most one attempt per intent per tick: the walk is
 // bounded to the queue length at entry, so anything re-parked mid-walk
 // waits for the next tick (the exactness the old snapshot guaranteed).
+//
+// The flush channel gates the pass. A full channel ends it on the spot,
+// because every intent behind the head would meet the same full channel
+// and pay a whole-trace Collect — a disk read per parked trace per tick —
+// to learn what the first one already reported. That is the O(pending)
+// amplification: the retry cost grew with the backlog exactly while the
+// flusher was least able to absorb it. Gated, a blocked tick costs one
+// Collect per shard, whatever the backlog.
+//
+// The gated intent keeps its place: pendqHead advances only past an
+// intent the pass actually disposed of, so a capacity stop leaves the
+// queue exactly as it found it — entry in pend, id still at the head.
+// Re-parking it at the back instead would demote the oldest intent
+// behind every newer one on the tick it was refused service, inverting
+// the oldest-first order the queue exists to hold. A collectErr does go
+// to the back: that intent has had its attempt.
 func (sh *shard) drainPending(s *Set) {
 	limit := len(sh.pendq)
+drain:
 	for sh.pendqHead < limit {
 		id := sh.pendq[sh.pendqHead]
-		sh.pendqHead++
 		req, ok := sh.pend[id]
-		if !ok {
-			continue // tombstone: swept out while queued
+		switch {
+		case !ok: // tombstone: swept out while queued
+		case req.need == 0:
+			delete(sh.pend, id)
+		default:
+			switch sh.collectOnce(s, id, req.reason, req.need, req.deadline) {
+			case sendFull:
+				// The channel is the gate. Wasted disk work this tick:
+				// this one Collect.
+				break drain
+			case collectErr:
+				// A read failure is not a capacity signal: re-park and
+				// keep draining — the next intent may collect cleanly.
+				delete(sh.pend, id)
+				sh.park(s, id, req.reason, req.need, req.deadline)
+			case sentOK, nothingOwed:
+				delete(sh.pend, id)
+			}
 		}
-		delete(sh.pend, id)
-		if req.need == 0 {
-			continue
-		}
-		sh.collectAndSend(s, id, req.reason, req.need, req.deadline)
+		sh.pendqHead++
 	}
-	if sh.pendqHead == len(sh.pendq) {
-		// Nothing re-parked: reset the storage instead of growing it.
-		sh.pendq = sh.pendq[:0]
-		sh.pendqHead = 0
-	}
+	sh.compactPendq()
 	sh.pendLen.Store(int64(len(sh.pend)))
+}
+
+const (
+	// pendqCompactFloor is the consumed prefix a compaction must recover
+	// to be worth its copy: below it the queue is small enough that the
+	// dead entries cost less than moving the live ones.
+	pendqCompactFloor = 64
+	// pendqShrinkCap is the capacity above which an over-large backing
+	// array is released rather than reused (16KB of ids).
+	pendqShrinkCap = 1024
+)
+
+// compactPendq keeps pendq's storage proportional to the work it indexes
+// rather than to the park events that built it, in two steps.
+//
+// The prefix walk is what makes the first one necessary: consumed slots
+// and tombstones accumulate ahead of pendqHead while fresh parks append
+// behind them — a wedged flusher turns every keep and every late
+// fragment into one — so an uncompacted queue grows without bound while
+// pend holds only what is still owed.
+//
+// Reslicing alone does not bound the STORAGE, only the length: pendq[:0]
+// retains the episode's peak backing array for the life of the process,
+// and that peak is set by park events rather than by parked intents — a
+// trace that parks, drains, and parks again spends a fresh slot each
+// time. Releasing it costs one allocation, taken only when the array is
+// both large and mostly empty, after which length sits within a size
+// class of capacity so the shrink cannot retrigger and churn tick after
+// tick.
+func (sh *shard) compactPendq() {
+	switch {
+	case sh.pendqHead == len(sh.pendq):
+		// Nothing re-parked: reset the length instead of growing it.
+		sh.pendq, sh.pendqHead = sh.pendq[:0], 0
+	case sh.pendqHead > pendqCompactFloor && sh.pendqHead > len(sh.pendq)/2:
+		n := copy(sh.pendq, sh.pendq[sh.pendqHead:])
+		sh.pendq, sh.pendqHead = sh.pendq[:n], 0
+	}
+	if cap(sh.pendq) > pendqShrinkCap && len(sh.pendq) < cap(sh.pendq)/4 {
+		sh.pendq = append([][16]byte(nil), sh.pendq...)
+	}
 }
 
 // drain empties whatever the queue holds at shutdown so accepted
