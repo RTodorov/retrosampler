@@ -24,10 +24,14 @@ type shard struct {
 	dec *decidedSet
 
 	// pend holds flush work the flusher could not take, deduped by trace
-	// id, and pendScratch snapshots its keys for the tick's retry pass.
-	// Both worker-owned.
-	pend        map[[16]byte]pendReq
-	pendScratch [][16]byte
+	// id; pendq is its FIFO of first-park order, drained oldest-first —
+	// those intents sit nearest their deadlines and their fragments
+	// nearest expiry. A swept-out entry leaves its id behind as a
+	// tombstone the drain skips (pop checks pend), so the queue never
+	// needs random removal. Both worker-owned.
+	pend      map[[16]byte]pendReq
+	pendq     [][16]byte
+	pendqHead int
 
 	// atFloorCause, when not floorClear, makes Offer shed this shard's
 	// fragments and says which rung-2 cause to charge (ADR-007 r5).
@@ -60,8 +64,13 @@ type shard struct {
 // owing only NeedFlush carries zero — expiry empties its Collect, which
 // needs no deadline to bound it.
 type pendReq struct {
-	reason   byte
-	need     Need
+	reason byte
+	need   Need
+	// queued says the id currently sits in pendq, so a merge into an
+	// existing entry never double-enqueues it. Packed with the two bytes
+	// above rather than after deadline: in the padding either way, so the
+	// entry stays 16 bytes and the FIFO's membership bit costs nothing.
+	queued   bool
 	deadline int64
 }
 
@@ -98,7 +107,8 @@ func (sh *shard) tick(s *Set) {
 	s.expiredBytes.Add(sh.buf.Expire(now))
 	sh.dec.evict(now.UnixNano())
 	sh.decidedLen.Store(int64(sh.dec.len()))
-	sh.retryPending(s, now.UnixNano())
+	sh.sweepPending(s, now.UnixNano())
+	sh.drainPending(s)
 	sh.reportDisk(s)
 
 	limit := s.opts.DiskBudget / 100 * int64(s.opts.WatermarkPct)
@@ -277,14 +287,16 @@ func (sh *shard) sendJob(s *Set, j *FlushJob) {
 // intent, not to the entry carrying it — an entry is deduped by trace id
 // and outlives any one intent, so a deadline left on a flush-only entry
 // would be adopted by whatever publish merges in next and could abandon
-// a broadcast that never got an attempt.
+// a broadcast that never got an attempt. The entry also carries a
+// queue-membership bit, so merging into one already waiting in pendq
+// keeps its place in line rather than enqueueing the id a second time.
 //
 // Within a publish intent the first deadline holds, because every
 // re-park deletes and recreates the entry: re-deriving it from the
 // current clock would push the horizon out by W per cycle and the intent
 // would outlive W forever, which is the unbounded growth the deadline
 // exists to close. The now+W fallback catches a NeedPublish arriving
-// without one, which retryPending would otherwise read as long expired.
+// without one, which the sweep would otherwise read as long expired.
 func (sh *shard) park(s *Set, id [16]byte, reason byte, need Need, deadline int64) {
 	req := sh.pend[id]
 	if req.reason == 0 {
@@ -299,39 +311,59 @@ func (sh *shard) park(s *Set, id [16]byte, reason byte, need Need, deadline int6
 		}
 	}
 	req.need |= need
+	if !req.queued {
+		req.queued = true
+		sh.pendq = append(sh.pendq, id)
+	}
 	sh.pend[id] = req
 }
 
-// retryPending replays every parked intent once against the buffer,
-// dropping the publish bit of any intent now past its deadline (ADR-011
-// r3): past W every peer's fragments of that trace have aged out, so the
-// broadcast can no longer cause a flush anywhere and abandoning it loses
-// nothing that still exists. An intent left owing nothing is simply gone.
-// The deadline is cleared with the bit it bounds, so what survives is a
-// plain flush intent carrying no claim about a publish (see park).
-//
-// The keys are snapshotted first because collectAndSend re-parks on a
-// still-full channel, and Go leaves it undefined whether a range revisits
-// a key re-added during iteration — one retry per intent per tick has to
-// be exact. The scratch slice is worker-local and reused; the tick is off
-// the hot path either way.
-func (sh *shard) retryPending(s *Set, now int64) {
-	sh.pendScratch = sh.pendScratch[:0]
-	for id := range sh.pend {
-		sh.pendScratch = append(sh.pendScratch, id)
-	}
-	for _, id := range sh.pendScratch {
-		req := sh.pend[id]
-		delete(sh.pend, id)
-		if req.need&NeedPublish != 0 && now >= req.deadline {
-			req.need &^= NeedPublish
-			req.deadline = 0
-			s.publishesAbandoned.Add(1)
+// sweepPending walks every parked intent in memory only: a NeedPublish
+// past its deadline is dropped and counted (ADR-011 r3) — past W every
+// peer's fragments have aged out, so the broadcast can no longer cause
+// a flush anywhere — and an intent left owing nothing is deleted. The
+// deadline is cleared with the bit it bounds (see park). Decoupled from
+// the drain so abandonment timing never depends on drain speed: this
+// pass touches no disk and costs nanoseconds per entry.
+func (sh *shard) sweepPending(s *Set, now int64) {
+	for id, req := range sh.pend {
+		if req.need&NeedPublish == 0 || now < req.deadline {
+			continue
 		}
+		req.need &^= NeedPublish
+		req.deadline = 0
+		s.publishesAbandoned.Add(1)
+		if req.need == 0 {
+			delete(sh.pend, id) // its pendq id becomes a tombstone
+			continue
+		}
+		sh.pend[id] = req
+	}
+}
+
+// drainPending replays parked intents oldest-first, one whole-trace
+// Collect each, at most one attempt per intent per tick: the walk is
+// bounded to the queue length at entry, so anything re-parked mid-walk
+// waits for the next tick (the exactness the old snapshot guaranteed).
+func (sh *shard) drainPending(s *Set) {
+	limit := len(sh.pendq)
+	for sh.pendqHead < limit {
+		id := sh.pendq[sh.pendqHead]
+		sh.pendqHead++
+		req, ok := sh.pend[id]
+		if !ok {
+			continue // tombstone: swept out while queued
+		}
+		delete(sh.pend, id)
 		if req.need == 0 {
 			continue
 		}
 		sh.collectAndSend(s, id, req.reason, req.need, req.deadline)
+	}
+	if sh.pendqHead == len(sh.pendq) {
+		// Nothing re-parked: reset the storage instead of growing it.
+		sh.pendq = sh.pendq[:0]
+		sh.pendqHead = 0
 	}
 	sh.pendLen.Store(int64(len(sh.pend)))
 }
