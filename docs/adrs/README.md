@@ -17,6 +17,7 @@ one — never edit a merged ADR.
 | 009 | [Decision-plane contracts — keep-on-error, flusher, required buffer](009-decision-plane-contracts.md) | Accepted | 2026-08-13 |
 | 010 | [Keep-detection contracts — baggage, baseline, OTTL policies](010-keep-detection-contracts.md) | Accepted | 2026-08-13 |
 | 011 | [Bus client and integration-hardening contracts](011-bus-client-and-integration-hardening.md) | Accepted | 2026-08-13 |
+| 012 | [Batch publish, gated retry drain, provoked saturation](012-batch-publish-and-gated-retry.md) | Accepted | 2026-08-17 |
 
 ## Conventions
 
