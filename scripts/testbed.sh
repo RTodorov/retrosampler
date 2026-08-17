@@ -20,6 +20,22 @@
 # expression in about 90 seconds. It is NEVER the gate: a floor means
 # nothing below the ADR-003 rate and under 1.5xW of run.
 #
+# TESTBED_OUTAGE=<start_s>:<dur_s> pauses the NATS container mid-run to
+# provoke the flusher-saturated regime DETERMINISTICALLY (docker pause:
+# the TCP peer freezes, every durable publish times out on ctx, intents
+# park at the full keep rate — no knife-edge rate tuning). Two shapes:
+#
+#   TESTBED_OUTAGE=120:60 scripts/testbed.sh
+#     saturation-recovery: outage well inside W=5m. Gates: all standard
+#     floors, publishes_abandoned == 0, pending drained by run end.
+#
+#   TESTBED_WINDOW=30s TESTBED_DURATION=180s TESTBED_MBPS=20 \
+#     TESTBED_OUTAGE=45:45 scripts/testbed.sh
+#     saturation-abandonment: outage LONGER than W. Gates:
+#     publishes_abandoned > 0 (ADR-011 r3 proven at testbed scale),
+#     pending drained by run end. Standard floors print with the smoke
+#     caveat; they are not the point of this shape.
+#
 # Exit codes: 0 floors hold; 1 floor failure; 2 environment error
 # (ADR-004 r4: a shortfall in the machine is not a regression).
 set -euo pipefail
@@ -55,6 +71,22 @@ secs() { # go duration -> whole seconds; -1 for a form this subset cannot read
 }
 w_s=$(secs "$W")
 dur_s=$(secs "$DUR")
+
+OUTAGE="${TESTBED_OUTAGE:-}"
+out_start=""
+out_dur=""
+if [[ -n "$OUTAGE" ]]; then
+  [[ "$OUTAGE" =~ ^[0-9]+:[0-9]+$ ]] || {
+    echo "ENV: TESTBED_OUTAGE must be <start_s>:<dur_s>, got '$OUTAGE'" >&2
+    exit 2
+  }
+  out_start="${OUTAGE%%:*}"
+  out_dur="${OUTAGE##*:}"
+  [[ "$dur_s" -le 0 ]] || [[ $((10#$out_start + 10#$out_dur)) -lt "$dur_s" ]] || {
+    echo "ENV: the outage ($OUTAGE) must end before the run does (${dur_s}s)" >&2
+    exit 2
+  }
+fi
 
 # --- preflight (ADR-004 r4: a shortfall here is environment, exit 2) ---
 # What the run puts on this volume: the buffer settles at the smaller of
@@ -146,6 +178,8 @@ cleanup() {
     kill -9 "$COL_PID" 2>/dev/null || true
     wait "$COL_PID" 2>/dev/null || true
   fi
+  [[ -z "${OUTAGE_PID:-}" ]] || kill "$OUTAGE_PID" 2>/dev/null || true
+  docker unpause testbed-nats >/dev/null 2>&1 || true
   docker rm -f testbed-nats >/dev/null 2>&1 || true
   # The segments and the kept stream are tens of gigabytes of opaque
   # bytes; the logs and the summary are the evidence, so those stay.
@@ -238,7 +272,7 @@ started=$(date +%s)
 while :; do
   printf '# t=%ss\n' "$(($(date +%s) - started))" >>"$SCRATCH/samples.txt"
   curl -sf http://127.0.0.1:8888/metrics 2>/dev/null |
-    grep -E '^otelcol_(process_memory_rss|processor_retrosampler_(shed_|pending_flushes))' \
+    grep -E '^otelcol_(process_memory_rss|processor_retrosampler_(shed_|pending_))' \
       >>"$SCRATCH/samples.txt" || true
   sleep 5
 done &
@@ -252,6 +286,18 @@ SAMPLER_PID=$!
 # Paced 1% high, an achieved rate at or above RATE_MBPS is a real
 # measurement rather than a rounding tolerance.
 mbits=$(awk -v m="$RATE_MBPS" 'BEGIN {printf "%.6g\n", m * 8 * 1.01}')
+OUTAGE_PID=""
+if [[ -n "$OUTAGE" ]]; then
+  (
+    sleep "$out_start"
+    docker pause testbed-nats >/dev/null
+    echo "outage: bus paused at t=${out_start}s for ${out_dur}s" >&2
+    sleep "$out_dur"
+    docker unpause testbed-nats >/dev/null
+    echo "outage: bus unpaused" >&2
+  ) &
+  OUTAGE_PID=$!
+fi
 load_ok=1
 go run ./cmd/loadgen --endpoints 127.0.0.1:4317 \
   --duration "$DUR" --target-mbps "$mbits" \
@@ -281,6 +327,7 @@ ladder_sheds=(
 queue_shed=otelcol_processor_retrosampler_shed_queue_full
 sheds=("${ladder_sheds[@]}" "$queue_shed")
 counter_keeps=otelcol_processor_retrosampler_kept_local
+counter_abandoned=otelcol_processor_retrosampler_pending_publishes_abandoned
 gauge_window=otelcol_processor_retrosampler_effective_window_seconds
 hist_age=otelcol_processor_retrosampler_flush_age_ratio
 missing=()
@@ -289,7 +336,7 @@ missing=()
 # and a bare prefix check does not. A reader that started appending _total
 # or _bytes would satisfy "^name" while sum() found nothing, and the shed
 # and rss floors would both go green over a series they never read.
-for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$gauge_window"; do
+for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$counter_abandoned" "$gauge_window"; do
   grep -qE "^$series[{ ]" "$SCRATCH/metrics.txt" || missing+=("$series")
 done
 # The histogram is the exception: its base name only ever appears carrying
@@ -403,6 +450,20 @@ floor "gc cpu" "$gccpu" % "v < 5" "< 5"
 # Not a performance number: a run whose keep loop never fired would pass
 # every floor above while proving nothing about the deployed shape.
 floor keeps "$keeps" traces "v > 0" "> 0"
+abandoned=$(sum "$counter_abandoned" "$SCRATCH/metrics.txt")
+pending_end=$(sum otelcol_processor_retrosampler_pending_flushes "$SCRATCH/metrics.txt")
+if [[ -n "$OUTAGE" ]] && awk -v d="$out_dur" -v w="$w_s" 'BEGIN {exit !(w > 0 && d > w)}'; then
+  # Outage longer than W: ADR-011 r3 abandonment MUST have fired, and
+  # the backlog must still have come home — degradation, never a wedge.
+  floor "publishes abandoned" "$abandoned" keeps "v > 0" "> 0"
+else
+  # Standard and recovery shapes: nothing may age out.
+  floor "publishes abandoned" "$abandoned" keeps "v == 0" "== 0"
+fi
+if [[ -n "$OUTAGE" ]]; then
+  # The wedge signature was a pending population that never drained.
+  floor "pending at end" "$pending_end" intents "v < 1000" "< 1000"
+fi
 [[ "$load_ok" -eq 1 ]] || {
   echo "FLOOR: the load ended early - the collector refused its exports" >&2
   tail -3 "$SCRATCH/loadgen.log" >&2
