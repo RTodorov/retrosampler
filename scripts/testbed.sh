@@ -165,6 +165,12 @@ floor_line=""
 
 cleanup() {
   [[ -z "${SAMPLER_PID:-}" ]] || kill "$SAMPLER_PID" 2>/dev/null || true
+  # Above the collector wait, not below it: shutdown drains the flusher,
+  # and a frozen NATS peer makes that drain block for the whole 30s and
+  # end at the kill -9. Unpausing first lets an exit mid-outage drain
+  # against a live bus.
+  [[ -z "${OUTAGE_PID:-}" ]] || kill "$OUTAGE_PID" 2>/dev/null || true
+  docker unpause testbed-nats >/dev/null 2>&1 || true
   # Wait the collector out rather than just signalling it: shutdown closes
   # segments and drains the flusher, and until that finishes the process
   # still holds :4317 and :8888 - which the NEXT run then fails to bind,
@@ -178,8 +184,6 @@ cleanup() {
     kill -9 "$COL_PID" 2>/dev/null || true
     wait "$COL_PID" 2>/dev/null || true
   fi
-  [[ -z "${OUTAGE_PID:-}" ]] || kill "$OUTAGE_PID" 2>/dev/null || true
-  docker unpause testbed-nats >/dev/null 2>&1 || true
   docker rm -f testbed-nats >/dev/null 2>&1 || true
   # The segments and the kept stream are tens of gigabytes of opaque
   # bytes; the logs and the summary are the evidence, so those stay.
@@ -328,6 +332,7 @@ queue_shed=otelcol_processor_retrosampler_shed_queue_full
 sheds=("${ladder_sheds[@]}" "$queue_shed")
 counter_keeps=otelcol_processor_retrosampler_kept_local
 counter_abandoned=otelcol_processor_retrosampler_pending_publishes_abandoned
+counter_pending=otelcol_processor_retrosampler_pending_flushes
 gauge_window=otelcol_processor_retrosampler_effective_window_seconds
 hist_age=otelcol_processor_retrosampler_flush_age_ratio
 missing=()
@@ -336,7 +341,8 @@ missing=()
 # and a bare prefix check does not. A reader that started appending _total
 # or _bytes would satisfy "^name" while sum() found nothing, and the shed
 # and rss floors would both go green over a series they never read.
-for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$counter_abandoned" "$gauge_window"; do
+for series in "$gauge_rss" "${sheds[@]}" "$counter_keeps" "$counter_abandoned" \
+  "$counter_pending" "$gauge_window"; do
   grep -qE "^$series[{ ]" "$SCRATCH/metrics.txt" || missing+=("$series")
 done
 # The histogram is the exception: its base name only ever appears carrying
@@ -451,7 +457,7 @@ floor "gc cpu" "$gccpu" % "v < 5" "< 5"
 # every floor above while proving nothing about the deployed shape.
 floor keeps "$keeps" traces "v > 0" "> 0"
 abandoned=$(sum "$counter_abandoned" "$SCRATCH/metrics.txt")
-pending_end=$(sum otelcol_processor_retrosampler_pending_flushes "$SCRATCH/metrics.txt")
+pending_end=$(sum "$counter_pending" "$SCRATCH/metrics.txt")
 if [[ -n "$OUTAGE" ]] && awk -v d="$out_dur" -v w="$w_s" 'BEGIN {exit !(w > 0 && d > w)}'; then
   # Outage longer than W: ADR-011 r3 abandonment MUST have fired, and
   # the backlog must still have come home — degradation, never a wedge.
@@ -461,6 +467,12 @@ else
   floor "publishes abandoned" "$abandoned" keeps "v == 0" "== 0"
 fi
 if [[ -n "$OUTAGE" ]]; then
+  # An outage that never landed - a docker pause that failed and took its
+  # subshell down under set -e - leaves every gate above green over a run
+  # that provoked nothing, and on a dur <= W shape nothing else would
+  # notice. Parked intents are the provocation's own receipt.
+  floor "pending peak" "$(peak "$counter_pending" "$SCRATCH/samples.txt")" \
+    intents "v > 0" "> 0"
   # The wedge signature was a pending population that never drained.
   floor "pending at end" "$pending_end" intents "v < 1000" "< 1000"
 fi
@@ -479,7 +491,7 @@ printf '  gc cycles          %s over %s\n' "$gccycles" "$DUR"
 # move together: an intent parks when the flush channel is full, and every
 # parked one costs its shard a fresh whole-trace Collect on the next tick.
 printf '  pending flushes    %s intents at the end of the run\n' \
-  "$(sum otelcol_processor_retrosampler_pending_flushes "$SCRATCH/metrics.txt")"
+  "$(sum "$counter_pending" "$SCRATCH/metrics.txt")"
 awk '/^# t=/ {t = $2} /_pending_flushes/ {if ($2 + 0 > m) {m = $2 + 0; at = t}}
   END {if (m > 0) printf "  pending peak       %d intents at %s\n", m, at}' \
   "$SCRATCH/samples.txt"
