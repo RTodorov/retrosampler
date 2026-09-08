@@ -106,6 +106,35 @@ keep is lost if the instance dies before publishing it (watch
 `published.keeps` against `kept.local`), and an exporter outage longer than
 `W` loses fragments to expiry (counted).
 
+## Performance
+
+The performance budgets are enforced by the test suite. The ingest path is
+asserted to allocate nothing per span (`testing.AllocsPerRun` over
+fragmenting, append, routing, and the keep path), six benchmarks run
+against committed baselines and fail CI on a >10% time regression or any
+new allocation, and the load floors below are checked by `make testbed`
+against a real ocb-built collector, a NATS container, and a paced load
+generator.
+
+| Floor | Bound |
+| --- | --- |
+| Sustained throughput | ≥ 125 MB/s of OTLP payload per instance (1 Gbps) |
+| Resident memory | ≤ 4 GiB at the target rate with `window: 5m` |
+| GC pause | < 10 ms, worst case over the whole run |
+| GC CPU | < 5% |
+| Data-loss sheds | 0 (`shed.floor_protected` + `shed.nothing_reclaimable`) |
+| Abandoned broadcasts | 0 on a healthy run |
+
+Reference run (2026-08-17, Apple M1 Max, load generator on the same
+machine): 126 MB/s held for 8 minutes (~14M spans, ~60 GB), 2.0 GiB
+resident of the 4 GiB budget, 8.2 ms worst GC pause, 0% GC CPU, and not
+one flush intent parked.
+
+Run `make testbed` to check the floors on your own hardware. The floors
+are absolute values, not machine-relative: a shortfall on hardware
+without headroom above the target counts as an environment error, not a
+regression (ADR-004).
+
 ## Telemetry
 
 The processor exports its instruments under
