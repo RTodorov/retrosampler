@@ -109,6 +109,43 @@ processors:
 | `elapsed_ms_attribute` | `baggage.elapsed_ms` | Span attribute carrying elapsed millis. |
 | `bus` | none (in-process) | `type: nats` plus a `nats` block: `url` (required), `mode` (`durable` default / `at_most_once`), `subject` (`retrosampler.keeps`), `stream` (`retrosampler-keeps`), `creds_file`. |
 
+### Baggage timing
+
+> [!IMPORTANT]
+> `trace_latency_threshold` and `trace_age_threshold` read **span
+> attributes**, not OTLP baggage. Baggage does not survive the hop to the
+> collector, so something in your SDK must stamp the values onto the span
+> before it is exported. If nothing does, both rules are inert: the
+> processor starts cleanly, keeps nothing on them, and never warns you.
+> Config validation cannot catch it — it only rejects an empty attribute
+> name, not an attribute nobody writes.
+
+`span_latency_threshold` needs none of this. It reads the span's own
+start and end timestamps.
+
+To stamp the values, add a span processor that copies baggage onto every
+span as it starts. In Go that is
+[`baggagecopy`](https://pkg.go.dev/go.opentelemetry.io/contrib/processors/baggagecopy),
+whose `NewSpanProcessor` takes a filter selecting which baggage keys to
+copy.
+
+The attribute name must equal `t0_attribute` and `elapsed_ms_attribute`
+exactly. The defaults assume baggage keys named `baggage.t0` and
+`baggage.elapsed_ms`; if you propagate `t0` instead, set `t0_attribute:
+t0` to match.
+
+Values may be an int attribute or a string of decimal digits. Anything
+else — a sign, a decimal point, whitespace, an empty string — counts as
+malformed. A negative int is clamped to zero.
+
+Three instruments tell you whether the timing arrives:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `baggage.malformed` | The attribute is present but unusable. |
+| `skew.clamped` | A negative elapsed or age, clamped to zero. |
+| `baggage.divergence_ms` | Last `(now − T0) − elapsed_ms`. Sampled only when both keys are present, so a value that never leaves zero means one of them never arrives. |
+
 ## Delivery semantics
 
 Decisions are exactly-once; span delivery is at-least-once. Batch retries
@@ -155,7 +192,8 @@ The processor exports its instruments under
 `otelcol.processor.retrosampler.*`; see [documentation.md](documentation.md)
 for the generated reference. The signals worth alerting on first:
 `pending.flushes` growing without draining, any
-`pending.publishes_abandoned`, any `bus.errors`, a widening
+`pending.publishes_abandoned`, any `bus.errors`, any
+`baggage.malformed`, a widening
 `kept.local` − `published.keeps` gap, `flush.age.ratio` mass near 1.0
 (window too tight), and the `shed.floor_protected` /
 `shed.nothing_reclaimable` counters (the disk ladder out of room).
