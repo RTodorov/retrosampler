@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620" role="img" aria-label="Retrosampler flow">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#adbac7"/></marker></defs>
+<rect width="1000" height="620" fill="#0d1117"/>
+<rect x="350" y="28" width="300" height="50" rx="8" fill="#161b22" stroke="#7c86f0" stroke-width="1.5"/>
+<text x="500" y="58" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="normal" font-style="normal" fill="#e6edf3" text-anchor="middle">instrumented services</text>
+<path d="M 420 78 L 185 186" fill="none" stroke="#adbac7" stroke-width="3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 500 78 L 500 186" fill="none" stroke="#adbac7" stroke-width="3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 580 78 L 815 186" fill="none" stroke="#adbac7" stroke-width="3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="432" y="104" width="136" height="22" fill="#0d1117"/>
+<text x="500" y="120" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="600" font-style="normal" fill="#e6edf3" text-anchor="middle">100% of spans</text>
+<rect x="40" y="155" width="920" height="172" rx="10" fill="#11161d" stroke="#30363d" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="56" y="176" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="start">collector fleet · retrosampler runs on every instance</text>
+<rect x="80" y="188" width="210" height="100" rx="8" fill="#161b22" stroke="#7c86f0" stroke-width="1.5"/>
+<text x="185" y="212" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" font-style="normal" fill="#e6edf3" text-anchor="middle">col-1</text>
+<text x="185" y="232" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">fragments of trace X</text>
+<text x="185" y="250" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">buffered on disk</text>
+<text x="185" y="272" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="italic" fill="#9198a1" text-anchor="middle">no local error</text>
+<rect x="395" y="188" width="210" height="100" rx="8" fill="#161b22" stroke="#e3a008" stroke-width="2.2"/>
+<text x="500" y="212" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" font-style="normal" fill="#e6edf3" text-anchor="middle">col-2</text>
+<text x="500" y="232" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">fragments of trace X</text>
+<text x="500" y="250" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">buffered on disk</text>
+<text x="500" y="272" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" font-style="normal" fill="#e3a008" text-anchor="middle">✗ error found here</text>
+<rect x="710" y="188" width="210" height="100" rx="8" fill="#161b22" stroke="#7c86f0" stroke-width="1.5"/>
+<text x="815" y="212" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" font-style="normal" fill="#e6edf3" text-anchor="middle">col-3</text>
+<text x="815" y="232" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">fragments of trace X</text>
+<text x="815" y="250" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">buffered on disk</text>
+<text x="815" y="272" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="italic" fill="#9198a1" text-anchor="middle">no local error</text>
+<path d="M 140 288 L 140 308" fill="none" stroke="#adbac7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 440 288 L 440 308" fill="none" stroke="#adbac7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 770 288 L 770 308" fill="none" stroke="#adbac7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 770 308 L 280 308" fill="none" stroke="#adbac7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M 140 308 L 280 308 L 280 545 L 385 545" fill="none" stroke="#adbac7" stroke-width="3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="298" y="404" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="start">each instance flushes its</text>
+<text x="298" y="420" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="start">own fragments of trace X</text>
+<rect x="560" y="392" width="340" height="92" rx="10" fill="#241a04" stroke="#e3a008" stroke-width="2"/>
+<text x="730" y="416" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" font-style="normal" fill="#e3a008" text-anchor="middle">NATS broker</text>
+<text x="730" y="437" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="normal" font-style="normal" fill="#e6edf3" text-anchor="middle">keep trace X  =  17 bytes on the wire</text>
+<text x="730" y="455" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="normal" fill="#9198a1" text-anchor="middle">16 B trace id  +  1 B reason</text>
+<text x="730" y="473" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="normal" font-style="italic" fill="#e3a008" text-anchor="middle">never a span, never a payload</text>
+<path d="M 560 288 L 566 298 A 7 7 0 0 1 578 312 L 604 392" fill="none" stroke="#e3a008" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="556" y="352" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" font-style="normal" fill="#e3a008" text-anchor="end">publish</text>
+<path d="M 790 392 L 830 288" fill="none" stroke="#e3a008" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="852" y="340" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" font-style="normal" fill="#e3a008" text-anchor="start">subscribe</text>
+<path d="M 560 462 L 292 462 A 7 7 0 0 0 268 462 L 200 462 L 200 288" fill="none" stroke="#e3a008" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arrow)" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="330" y="480" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" font-style="normal" fill="#e3a008" text-anchor="middle">subscribe</text>
+<rect x="390" y="518" width="220" height="56" rx="8" fill="#161b22" stroke="#7c86f0" stroke-width="1.5"/>
+<text x="500" y="552" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" font-style="normal" fill="#e6edf3" text-anchor="middle">backend</text>
+<text x="376" y="528" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" font-style="normal" fill="#e6edf3" text-anchor="end">kept traces only</text>
+</svg>

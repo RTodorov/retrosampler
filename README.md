@@ -27,11 +27,10 @@ exporter never blocks ingest.
 
 ## How it works
 
-![Spans from one trace land on three collector instances. Each instance
-buffers every span on local disk. One instance finds the error and
-publishes a 17-byte keep on the NATS broker. The peers subscribe, and
-each flushes its own fragments of that trace to the
-backend.](docs/img/retrosampler-flow.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/retrosampler-flow-dark.svg">
+  <img src="docs/img/retrosampler-flow.svg" alt="Spans from one trace land on three collector instances. Each instance buffers every span on local disk. One instance finds the error and publishes a 17-byte keep on the NATS broker. The peers subscribe, and each flushes its own fragments of that trace to the backend.">
+</picture>
 
 Every instance buffers 100% of the spans it receives on local disk. The
 spans of one trace land on different instances, so no single instance
@@ -125,18 +124,39 @@ start and end timestamps.
 
 To stamp the values, add a span processor that copies baggage onto every
 span as it starts. In Go that is
-[`baggagecopy`](https://pkg.go.dev/go.opentelemetry.io/contrib/processors/baggagecopy),
-whose `NewSpanProcessor` takes a filter selecting which baggage keys to
-copy.
+[`baggagecopy`](https://pkg.go.dev/go.opentelemetry.io/contrib/processors/baggagecopy).
+Filter it down to the two timing keys rather than copying all of baggage:
 
-The attribute name must equal `t0_attribute` and `elapsed_ms_attribute`
-exactly. The defaults assume baggage keys named `baggage.t0` and
-`baggage.elapsed_ms`; if you propagate `t0` instead, set `t0_attribute:
-t0` to match.
+```go
+import (
+	"go.opentelemetry.io/contrib/processors/baggagecopy"
+	"go.opentelemetry.io/otel/baggage"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+)
 
-Values may be an int attribute or a string of decimal digits. Anything
-else — a sign, a decimal point, whitespace, an empty string — counts as
-malformed. A negative int is clamped to zero.
+func timingKeys(m baggage.Member) bool {
+	return m.Key() == "baggage.t0" || m.Key() == "baggage.elapsed_ms"
+}
+
+func newTracerProvider() *sdktrace.TracerProvider {
+	return sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(baggagecopy.NewSpanProcessor(timingKeys)),
+		// your exporter, sampler, resource, ...
+	)
+}
+```
+
+`baggagecopy` writes each attribute under the baggage key verbatim, with
+no prefix, so the **baggage key** must equal `t0_attribute` and
+`elapsed_ms_attribute`. The defaults therefore expect baggage keys named
+`baggage.t0` and `baggage.elapsed_ms`. If you propagate `t0` instead, set
+`t0_attribute: t0` to match.
+
+It also writes every value as a string. The processor accepts a string of
+decimal digits only, so through `baggagecopy` a sign, a decimal point,
+whitespace or an empty value arrives **malformed**, not clamped — a
+negative `elapsed_ms` included. The int-attribute path, and its clamp of
+a negative to zero, apply only to a custom stamper that writes an int.
 
 Three instruments tell you whether the timing arrives:
 
