@@ -27,6 +27,20 @@ exporter never blocks ingest.
 
 ## How it works
 
+![Spans from one trace land on three collector instances. Each instance
+buffers every span on local disk. One instance finds the error and
+publishes a 17-byte keep on the NATS broker. The peers subscribe, and
+each flushes its own fragments of that trace to the
+backend.](docs/img/retrosampler-flow.svg)
+
+Every instance buffers 100% of the spans it receives on local disk. The
+spans of one trace land on different instances, so no single instance
+sees the whole trace. One instance finds the error and decides to keep
+trace X. It publishes 17 bytes on the broker — a 16-byte trace id and one
+reason byte. Every peer then flushes its own fragments of that trace. The
+broker carries decisions, never payload. Spans that nobody keeps age out
+on disk at `W`, and never cross the network boundary you pay for.
+
 - **Buffer**: spans are fragmented and appended to per-shard disk segments;
   a compact index (~150 B per live trace) maps trace ids to fragments.
   Fragments survive restart; expiry is by whole segment at `W`.
