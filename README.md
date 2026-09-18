@@ -38,7 +38,7 @@ sees the whole trace. One instance finds the error and decides to keep
 trace X. It publishes 17 bytes on the broker — a 16-byte trace id and one
 reason byte. Every peer then flushes its own fragments of that trace. The
 broker carries decisions, never payload. Spans that nobody keeps age out
-on disk at `W`, and never cross the network boundary you pay for.
+on disk at `W`, and never cross the network boundary.
 
 - **Buffer**: spans are fragmented and appended to per-shard disk segments;
   a compact index (~150 B per live trace) maps trace ids to fragments.
@@ -111,20 +111,20 @@ processors:
 ### Baggage timing
 
 > [!IMPORTANT]
-> Baggage reaches this processor as **span attributes**. The collector
-> cannot read baggage directly — OTLP carries no baggage field — so
-> something in your SDK must copy it onto the span before export.
-> Arranging that copy is your job, not the processor's. If nothing does
-> it, `trace_latency_threshold` and `trace_age_threshold` are inert: the
-> processor starts cleanly, keeps nothing on them, and never warns you.
-> Config validation cannot catch it — it only rejects an empty attribute
-> name, not an attribute nobody writes.
+> `trace_latency_threshold` and `trace_age_threshold` fire only if your
+> SDK copies baggage onto the span, which is your job to arrange — see
+> below. If nothing does it, both are inert: the processor starts
+> cleanly, keeps nothing on them, and never warns you. Config validation
+> cannot catch it, because it only rejects an empty attribute name, not
+> an attribute nobody writes.
 
 `span_latency_threshold` needs none of this. It reads the span's own
 start and end timestamps.
 
-To stamp the values, add a span processor that copies baggage onto every
-span as it starts. In Go that is
+Baggage reaches this processor as span attributes: the collector cannot
+read baggage directly, because OTLP carries no baggage field. So add a
+span processor that copies baggage onto every span as it starts. In Go
+that is
 [`baggagecopy`](https://pkg.go.dev/go.opentelemetry.io/contrib/processors/baggagecopy).
 Filter it down to the two timing keys rather than copying all of baggage:
 
@@ -166,6 +166,45 @@ Three instruments tell you whether the timing arrives:
 | `baggage.malformed` | The attribute is present but unusable. |
 | `skew.clamped` | A negative elapsed or age, clamped to zero. |
 | `baggage.divergence_ms` | Last `(now − T0) − elapsed_ms`. Sampled only when both keys are present, so a value that never leaves zero means one of them never arrives. |
+
+### Keep policies
+
+`policies` is an ordered list of named [OTTL](https://pkg.go.dev/github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl)
+conditions evaluated in the span context. The first one that matches keeps
+the trace; the rest are skipped.
+
+```yaml
+processors:
+  retrosampler:
+    storage_dir: /var/lib/otelcol/retrosampler
+    disk_budget: 42949672960
+    policies:
+      - name: server_5xx
+        condition: span.kind == SPAN_KIND_SERVER and span.attributes["http.response.status_code"] >= 500
+      - name: checkout_path
+        condition: span.attributes["url.path"] == "/checkout"
+      - name: payments_service
+        condition: resource.attributes["service.name"] == "payments"
+      - name: orders_api
+        condition: IsMatch(span.name, "^POST /api/v[0-9]+/orders$")
+```
+
+Names must be non-empty and unique. They are not decoration: they key the
+`policy.matches` and `policy.eval_errors` instruments, so a policy that
+never fires is visible by name.
+
+A condition that does not parse fails `Validate` at config load, before
+the collector starts. A condition that parses but errors at evaluation —
+a type mismatch against a span it did not expect — is ignore-and-count:
+the span does not match, `policy.eval_errors` moves, and the policy warns
+once. It never fails the batch, because one poison span would otherwise
+become an endlessly retried batch.
+
+Policies run last in the detection chain, after `keep_on_error`, the
+latency thresholds and the baggage conditions. Those built-ins are
+allocation-free; the OTTL tail is not, and it is priced by its own
+benchmark (ADR-004 r2). Put the cheap built-ins to work first and keep
+the policy list short.
 
 ## Delivery semantics
 
