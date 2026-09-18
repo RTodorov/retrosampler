@@ -111,10 +111,11 @@ processors:
 ### Baggage timing
 
 > [!IMPORTANT]
-> `trace_latency_threshold` and `trace_age_threshold` read **span
-> attributes**, not OTLP baggage. Baggage does not survive the hop to the
-> collector, so something in your SDK must stamp the values onto the span
-> before it is exported. If nothing does, both rules are inert: the
+> Baggage reaches this processor as **span attributes**. The collector
+> cannot read baggage directly — OTLP carries no baggage field — so
+> something in your SDK must copy it onto the span before export.
+> Arranging that copy is your job, not the processor's. If nothing does
+> it, `trace_latency_threshold` and `trace_age_threshold` are inert: the
 > processor starts cleanly, keeps nothing on them, and never warns you.
 > Config validation cannot catch it — it only rejects an empty attribute
 > name, not an attribute nobody writes.
